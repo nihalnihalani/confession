@@ -21,7 +21,7 @@ from typing import Any, Optional
 from . import config
 from .events import EventBus
 from .models import Claim, EventType, utcnow
-from .pioneer_client import PioneerClient, job_id_of
+from .pioneer_client import PioneerClient, is_success_state, job_id_of, job_state_of
 
 
 class Trainer:
@@ -57,7 +57,15 @@ class Trainer:
         async with self._lock:
             await asyncio.to_thread(_append_jsonl, self._lies_path, record)
         if self._bus is not None:
-            await self._bus.emit(EventType.LIE_RECORDED, **record)
+            # lie_recorded contract (ui/src/types.ts): {claim_id, agent_id, claim_text,
+            # report_url?}. The ledger file keeps the richer record (root_cause, task_id).
+            await self._bus.emit(
+                EventType.LIE_RECORDED,
+                claim_id=claim.id,
+                agent_id=claim.agent_id,
+                claim_text=claim.text,
+                report_url=report_url,
+            )
         return record
 
     def read_lies(self) -> list[dict[str, Any]]:
@@ -136,47 +144,60 @@ class Trainer:
         client = self._client()
         name = dataset_name or f"confession-lies-{version}"
 
-        if self._bus is not None:
-            await self._bus.emit(
-                EventType.TRAINING_STARTED,
-                dataset_name=name,
-                base_model=base_model,
-                example_count=len(examples),
-            )
-
-        async def _log(kind: str, response: Any) -> None:
+        async def _record(kind: str, response: Any) -> None:
+            """Append every real Pioneer response to the training log (file only)."""
             entry = {"at": utcnow().isoformat(), "kind": kind, "response": response}
             await asyncio.to_thread(_append_jsonl, self._training_path, entry)
-            if self._bus is not None:
-                await self._bus.emit(EventType.TRAINING_STATUS, kind=kind, response=response)
 
-        # 1) Generate/register the dataset from the caught-lie examples.
+        # 1) Generate/register the dataset from the caught-lie examples. The generation
+        # phase is logged to file but not surfaced as WS training events: the UI's job
+        # model is keyed on the single fine-tune job id (below), which IS the model id.
         generate_response = await client.generate_dataset(name, examples)
-        await _log("generate_started", generate_response)
+        await _record("generate_started", generate_response)
         generate_job_id = job_id_of(generate_response)
         if generate_job_id:
             generate_final = await client.poll_job(
                 client.get_generate_job,
                 generate_job_id,
-                on_status=lambda s: _log("generate_status", s),
+                on_status=lambda s: _record("generate_status", s),
             )
-            await _log("generate_finished", generate_final)
+            await _record("generate_finished", generate_final)
 
-        # 2) Start the LoRA fine-tune over that dataset.
+        # 2) Start the LoRA fine-tune over that dataset — this job is THE training job.
         finetune_response = await client.start_finetune(
             dataset_name=name, version=version, base_model=base_model
         )
-        await _log("finetune_started", finetune_response)
+        await _record("finetune_started", finetune_response)
         finetune_job_id = job_id_of(finetune_response)
         if not finetune_job_id:
             return finetune_response
 
+        # training_started contract (ui/src/types.ts): {job_id, base_model?, example_count?}.
+        if self._bus is not None:
+            await self._bus.emit(
+                EventType.TRAINING_STARTED,
+                job_id=finetune_job_id,
+                base_model=base_model,
+                example_count=len(examples),
+            )
+
+        async def _on_finetune_status(status: Any) -> None:
+            await _record("finetune_status", status)
+            if self._bus is not None:
+                state = job_state_of(status)
+                # When training completes, the job id IS the chat model id.
+                model_id = finetune_job_id if is_success_state(state) else None
+                await self._bus.emit(
+                    EventType.TRAINING_STATUS,
+                    job_id=finetune_job_id,
+                    status=state,
+                    model_id=model_id,
+                )
+
         finetune_final = await client.poll_job(
-            client.get_finetune_job,
-            finetune_job_id,
-            on_status=lambda s: _log("finetune_status", s),
+            client.get_finetune_job, finetune_job_id, on_status=_on_finetune_status
         )
-        await _log("finetune_finished", finetune_final)
+        await _record("finetune_finished", finetune_final)
         return finetune_final
 
 

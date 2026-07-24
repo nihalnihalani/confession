@@ -1,43 +1,66 @@
 """FastAPI server — REST + WebSocket event stream for the dashboard.
 
-Endpoints:
-* POST /claims            submit a claim; audits it as a background task, returns its id
-* GET  /claims/{id}       the claim and its audit result
-* GET  /health            configuration + liveness
-* GET  /receipts          live state: tiers, recent verdicts (real report URLs),
-                          caught-lie tail, training-log tail
-* GET  /events            ring-buffer dump (dashboard history view)
-* WS   /ws                live event stream (replays the ring buffer on connect)
+Endpoints (paths match what the UI calls; see ui/src/types.ts and its dev proxy, which
+forwards /api, /events, and /ws to this server):
+* POST /api/claims          submit a claim {agent_id, task_id, claim_text} -> {claim_id}
+* GET  /api/claims/{id}      the claim and its audit result
+* GET  /api/receipts         live proof state: {replay[], guild[], pioneer[]}
+* GET  /api/tasks            real task options for the judge form ([] when none configured)
+* GET  /events               ring-buffer history ({events:[...]})
+* WS   /ws                   live event stream (replays the ring buffer on connect)
+* GET  /health               configuration + liveness
 
-The judge-submit path is just POST /claims — the identical pipeline internal claims use.
-There is no separate, special-cased endpoint; that is the Autonomy-axis proof.
+The judge-submit path is just POST /api/claims — the identical pipeline internal claims
+use. There is no separate, special-cased endpoint; that is the Autonomy-axis proof.
+
+Every WS event conforms exactly to the `EngineEvent` union in ui/src/types.ts; the field
+names below are the authoritative contract, changed only in lockstep with that file.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from . import config
 from .auditor import Auditor
 from .events import EventBus
-from .models import AuditResult, Claim, EventType, utcnow
-from .pioneer_client import PioneerClient, PioneerNotConfigured
+from .models import AuditResult, Claim, EventType, tier_label, utcnow
+from .pioneer_client import (
+    PioneerClient,
+    PioneerNotConfigured,
+    is_success_state,
+    job_id_of,
+    job_state_of,
+)
 from .replay_client import ReplayClient, ReplayConfigError
 from .tiers import TierManager
 from .trainer import Trainer
 
 
 class ClaimRequest(BaseModel):
+    """POST /api/claims body. Contract field is `claim_text`; `text` is accepted as a
+    tolerant alias so a direct curl using the shorter name still works."""
+
     agent_id: str
     task_id: str
-    text: str
+    claim_text: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_text_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "claim_text" not in data and "text" in data:
+            data = {**data, "claim_text": data["text"]}
+        return data
 
 
 class AppState:
@@ -51,8 +74,6 @@ class AppState:
         self.results: dict[str, AuditResult] = {}
         self._replay: Optional[ReplayClient] = None
         self._replay_error: Optional[str] = None
-        # Build the Replay client eagerly so /health reflects real config, but tolerate a
-        # missing token (the server still serves receipts/health without it).
         try:
             self._replay = ReplayClient()
         except ReplayConfigError as exc:
@@ -68,9 +89,7 @@ class AppState:
         return self._replay
 
     def auditor(self) -> Auditor:
-        return Auditor(
-            bus=self.bus, replay=self.replay, tiers=self.tiers, trainer=self.trainer
-        )
+        return Auditor(bus=self.bus, replay=self.replay, tiers=self.tiers, trainer=self.trainer)
 
 
 @asynccontextmanager
@@ -100,7 +119,8 @@ def create_app() -> FastAPI:
     async def _run_audit(claim: Claim) -> None:
         result = await state.auditor().audit(claim)
         state.results[claim.id] = result
-        await state.bus.emit(EventType.RECEIPTS_UPDATED, claim_id=claim.id)
+        # receipts_updated contract: signal only, no payload — consumers re-fetch receipts.
+        await state.bus.emit(EventType.RECEIPTS_UPDATED)
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
@@ -116,31 +136,29 @@ def create_app() -> FastAPI:
             "subscribers": state.bus.subscriber_count,
         }
 
-    @app.post("/claims")
-    async def submit_claim(request: ClaimRequest) -> dict[str, str]:
+    async def _submit_claim(request: ClaimRequest) -> dict[str, str]:
         if not config.TARGET_APP_URL:
             raise HTTPException(status_code=503, detail="TARGET_APP_URL is not configured.")
-        # Touch the Replay client so a missing token fails fast with 503.
-        _ = state.replay
+        _ = state.replay  # a missing Replay token fails fast with 503
         claim = Claim(
             id=uuid.uuid4().hex,
             agent_id=request.agent_id,
             task_id=request.task_id,
-            text=request.text,
+            text=request.claim_text,
         )
         state.claims[claim.id] = claim
+        # claim_submitted contract: {claim_id, agent_id, task_id?, task_title?, claim_text}.
         await state.bus.emit(
             EventType.CLAIM_SUBMITTED,
             claim_id=claim.id,
             agent_id=claim.agent_id,
             task_id=claim.task_id,
-            text=claim.text,
+            claim_text=claim.text,
         )
         asyncio.create_task(_run_audit(claim))
         return {"claim_id": claim.id}
 
-    @app.get("/claims/{claim_id}")
-    async def get_claim(claim_id: str) -> dict[str, Any]:
+    def _get_claim(claim_id: str) -> dict[str, Any]:
         claim = state.claims.get(claim_id)
         if claim is None:
             raise HTTPException(status_code=404, detail="claim not found")
@@ -150,9 +168,20 @@ def create_app() -> FastAPI:
             "result": result.model_dump(mode="json") if result else None,
         }
 
-    @app.get("/receipts")
-    async def receipts() -> dict[str, Any]:
+    async def _receipts() -> dict[str, Any]:
         return _build_receipts(state)
+
+    async def _tasks() -> list[dict[str, str]]:
+        return _load_tasks()
+
+    # Register claim/receipts/tasks under both /api/* (what the UI calls through its dev
+    # proxy) and the bare paths (convenient for curl and the original brief). Same
+    # handlers, one behavior — no special-casing.
+    for prefix in ("/api", ""):
+        app.post(f"{prefix}/claims")(_submit_claim)
+        app.get(f"{prefix}/claims/{{claim_id}}")(_get_claim)
+        app.get(f"{prefix}/receipts")(_receipts)
+        app.get(f"{prefix}/tasks")(_tasks)
 
     @app.get("/events")
     async def events() -> dict[str, Any]:
@@ -174,35 +203,96 @@ def create_app() -> FastAPI:
     return app
 
 
+def _load_tasks() -> list[dict[str, str]]:
+    """Real task options for the judge form.
+
+    Reads a task file if one is present (CONFESSION_TASKS_FILE, else
+    engine/state/tasks.json) — a JSON array of {id, title}. When no file exists, returns
+    an empty list: the judge form then falls back to a free-text task id. Nothing is
+    invented here — an empty list is the honest answer when no task registry is present.
+    """
+    override = os.getenv("CONFESSION_TASKS_FILE")
+    path = Path(override) if override else config.state_dir() / "tasks.json"
+    if not path.exists():
+        return []
+    raw = json.loads(path.read_text())
+    tasks: list[dict[str, str]] = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, dict) and "id" in item and "title" in item:
+            tasks.append({"id": str(item["id"]), "title": str(item["title"])})
+    return tasks
+
+
 def _build_receipts(state: AppState) -> dict[str, Any]:
-    """Dump the current live state that the receipts page renders."""
-    recent_verdicts = []
-    for claim_id, result in list(state.results.items())[-25:]:
-        claim = state.claims.get(claim_id)
-        recent_verdicts.append(
+    """Dump the current live proof state in the GET /api/receipts shape (ui/src/types.ts):
+    {replay: ReplayReceipt[], guild: GuildReceipt[], pioneer: PioneerReceipt[]}."""
+    replay: list[dict[str, Any]] = []
+    for claim_id, result in state.results.items():
+        if not result.report_url:
+            continue  # ReplayReceipt.report_url is required — skip entries without one
+        replay.append(
             {
-                "claim_id": claim_id,
-                "agent_id": claim.agent_id if claim else None,
-                "task_id": claim.task_id if claim else None,
-                "text": claim.text if claim else None,
-                "verdict": result.verdict.value,
                 "report_url": result.report_url,
-                "replay_project_id": result.replay_project_id,
-                "bugs": [bug.model_dump(mode="json") for bug in result.bugs],
-                "error": result.error,
-                "finished_at": result.finished_at.isoformat() if result.finished_at else None,
+                "claim_id": claim_id,
+                "verdict": result.verdict.value,
+                "created_at": result.finished_at.isoformat() if result.finished_at else None,
             }
         )
-    return {
-        "generated_at": utcnow().isoformat(),
-        "tiers": {
-            agent_id: tier.model_dump(mode="json")
-            for agent_id, tier in state.tiers.all_states().items()
-        },
-        "recent_verdicts": recent_verdicts,
-        "lies": state.trainer.read_lies()[-25:],
-        "training": state.trainer.read_training_log()[-25:],
-    }
+
+    guild: list[dict[str, Any]] = []
+    for agent_id, tier in state.tiers.all_states().items():
+        note = None
+        if tier.history:
+            last = tier.history[-1]
+            transition = last.get("transition")
+            side_effect = last.get("side_effect")
+            if transition:
+                note = f"{transition} ({side_effect})" if side_effect else str(transition)
+        guild.append(
+            {"agent_id": agent_id, "tier": tier_label(tier.tier), "session_note": note}
+        )
+
+    pioneer = _pioneer_receipts(state.trainer.read_training_log())
+    return {"replay": replay, "guild": guild, "pioneer": pioneer}
+
+
+def _pioneer_receipts(training_log: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate the training log into PioneerReceipt[] — one row per fine-tune job.
+
+    Rows are keyed by the fine-tune job id (which IS the model id once training
+    succeeds). `status` is the latest observed state; `model_id` is set only when a
+    success state has been seen.
+    """
+    jobs: dict[str, dict[str, Any]] = {}
+    for entry in training_log:
+        kind = entry.get("kind")
+        response = entry.get("response")
+        at = entry.get("at")
+        if kind not in {"finetune_started", "finetune_status", "finetune_finished"}:
+            continue
+        job_id = (
+            job_id_of(response) if kind == "finetune_started" else _job_id_from_status(response)
+        )
+        if not job_id:
+            continue
+        row = jobs.setdefault(job_id, {"job_id": job_id, "status": "started", "started_at": at})
+        if kind == "finetune_started":
+            row["started_at"] = row.get("started_at") or at
+            continue
+        state_str = job_state_of(response)
+        row["status"] = state_str
+        if is_success_state(state_str):
+            row["model_id"] = job_id
+    return list(jobs.values())
+
+
+def _job_id_from_status(response: Any) -> Optional[str]:
+    if isinstance(response, dict):
+        for key in ("id", "job_id", "training_job_id", "jobId"):
+            value = response.get(key)
+            if value:
+                return str(value)
+    return None
 
 
 # Module-level ASGI app for `uvicorn confession.server:app`.

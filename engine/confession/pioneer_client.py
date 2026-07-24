@@ -221,11 +221,24 @@ def _model_ids(result: Any) -> list[str]:
     return ids
 
 
-def _job_state(status: Any) -> Any:
-    """Extract a job's state field from a status payload, defensively."""
+SUCCESS_STATES = frozenset({"succeeded", "completed", "complete"})
+
+
+def job_state_of(status: Any) -> str:
+    """Extract a job's state string from a status payload, defensively (lowercased)."""
     if isinstance(status, dict):
-        return status.get("status") or status.get("state") or status.get("phase") or "unknown"
+        raw = status.get("status") or status.get("state") or status.get("phase") or "unknown"
+        return str(raw).lower()
     return "unknown"
+
+
+def is_success_state(state: str) -> bool:
+    """True when a job state string denotes successful completion."""
+    return state.lower() in SUCCESS_STATES
+
+
+def _job_state(status: Any) -> str:
+    return job_state_of(status)
 
 
 def job_id_of(response: Any) -> Optional[str]:
