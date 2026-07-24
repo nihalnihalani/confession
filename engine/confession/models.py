@@ -57,6 +57,25 @@ class BugFinding(BaseModel):
     bug_id: Optional[str] = None
     status: Optional[str] = None
 
+    def to_contract(self) -> dict[str, Any]:
+        """Map to the UI's `Bug` shape (ui/src/types.ts): {id?, title, severity,
+        root_cause, url?}. Missing severity/root_cause are labeled, never invented into a
+        stronger finding: absent severity becomes "unknown", absent root_cause an empty
+        string.
+        """
+        return {
+            "id": self.bug_id,
+            "title": self.title,
+            "severity": self.severity or "unknown",
+            "root_cause": self.root_cause or "",
+            "url": self.url,
+        }
+
+
+def tier_label(tier: int) -> str:
+    """Render an integer tier as the UI's `Tier` string: 0 -> "L0", 1 -> "L1"."""
+    return f"L{tier}"
+
 
 class Claim(BaseModel):
     """A Builder (or judge) assertion that a task is complete."""

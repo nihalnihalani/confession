@@ -71,14 +71,16 @@ class Auditor:
             result.verdict = Verdict.PENDING
             result.finished_at = utcnow()
             claim.status = ClaimStatus.RESOLVED
+            # verdict_reached contract (ui/src/types.ts): {claim_id, agent_id, verdict,
+            # report_url?, bugs[]}. PENDING carries no bugs; the infra reason lives on the
+            # AuditResult and in /api/receipts, not on this event.
             await self._bus.emit(
                 EventType.VERDICT_REACHED,
                 claim_id=claim.id,
                 agent_id=claim.agent_id,
                 verdict=result.verdict.value,
-                error=result.error,
                 report_url=result.report_url,
-                replay_project_id=result.replay_project_id,
+                bugs=[],
             )
             return result
 
@@ -92,9 +94,7 @@ class Auditor:
             agent_id=claim.agent_id,
             verdict=result.verdict.value,
             report_url=result.report_url,
-            replay_project_id=result.replay_project_id,
-            bugs=[bug.model_dump(mode="json") for bug in scoped],
-            bug_count=len(scoped),
+            bugs=[bug.to_contract() for bug in scoped],
         )
 
         # -- consequence: tier ratchet (the one write path) -----------------
@@ -127,12 +127,11 @@ class Auditor:
         result.replay_project_id = project_id
         result.report_url = dashboard_url_of(create_response)
 
+        # audit_started contract (ui/src/types.ts): {claim_id, project_url?, target_url?}.
         await self._bus.emit(
             EventType.AUDIT_STARTED,
             claim_id=claim.id,
-            agent_id=claim.agent_id,
-            replay_project_id=project_id,
-            report_url=result.report_url,
+            project_url=result.report_url,
             target_url=self._target_url,
         )
 
@@ -142,11 +141,13 @@ class Auditor:
             )
 
         async def _on_progress(status: dict) -> None:
+            # audit_progress contract: {claim_id, message, progress?}. Replay's status is
+            # a counts summary (no completion fraction), so we surface a human message and
+            # omit progress rather than inventing a percentage.
             await self._bus.emit(
                 EventType.AUDIT_PROGRESS,
                 claim_id=claim.id,
-                replay_project_id=project_id,
-                status=status,
+                message=_progress_message(status),
             )
 
         kwargs = {}
@@ -158,3 +159,37 @@ class Auditor:
 
         result.bugs = await self._replay.fetch_bugs(project_id, status="open")
         return result
+
+
+def _progress_message(status: dict) -> str:
+    """Build a human progress line from a Replay status summary (counts of explorations,
+    journeys, test runs, and bugs). Missing counts are simply omitted."""
+    parts: list[str] = []
+    for key, noun in (
+        ("explorations", "exploration"),
+        ("journeys", "journey"),
+        ("test_runs", "test run"),
+        ("testRuns", "test run"),
+        ("bugs", "bug"),
+        ("open_bugs", "open bug"),
+    ):
+        value = status.get(key) if isinstance(status, dict) else None
+        count = _count_of(value)
+        if count is not None:
+            plural = "" if count == 1 else "s"
+            parts.append(f"{count} {noun}{plural}")
+    return "Replay QA running: " + ", ".join(parts) if parts else "Replay QA running…"
+
+
+def _count_of(value: object) -> Optional[int]:
+    """Coerce a status field that may be a raw int or a {count/total: n} object."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, dict):
+        for key in ("count", "total", "open"):
+            inner = value.get(key)
+            if isinstance(inner, int) and not isinstance(inner, bool):
+                return inner
+    return None

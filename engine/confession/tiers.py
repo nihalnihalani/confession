@@ -25,7 +25,7 @@ from typing import Optional
 
 from . import config
 from .events import EventBus
-from .models import EventType, TierState, Verdict, utcnow
+from .models import Event, EventType, TierState, Verdict, tier_label, utcnow
 
 # Transition labels returned by `next_tier_state`.
 PROMOTED = "promoted"
@@ -150,14 +150,19 @@ class TierManager:
             self._save()
 
             if transition is not None and self._bus is not None:
-                await self._bus.emit(
-                    EventType.TIER_CHANGED,
-                    agent_id=agent_id,
-                    transition=transition,
-                    tier=new_state.tier,
-                    streak=new_state.streak,
-                    side_effect=side_effect,
-                    verdict=verdict.value,
+                # tier_changed contract (ui/src/types.ts): {agent_id, from, to, reason}.
+                # `from` is a Python keyword, so the payload is built as a dict and
+                # published directly rather than via emit(**payload).
+                await self._bus.publish(
+                    Event(
+                        type=EventType.TIER_CHANGED,
+                        payload={
+                            "agent_id": agent_id,
+                            "from": tier_label(current.tier),
+                            "to": tier_label(new_state.tier),
+                            "reason": _tier_reason(transition, verdict, side_effect, self._ratchet_n),
+                        },
+                    )
                 )
             return new_state
 
@@ -191,3 +196,15 @@ class TierManager:
         if returncode == 0:
             return "guild_agent_added" if action == "add" else "guild_agent_removed"
         return "guild_cli_error"
+
+
+def _tier_reason(transition: str, verdict: Verdict, side_effect: Optional[str], ratchet_n: int) -> str:
+    """Human-readable `reason` for a tier_changed event, including the honest Guild
+    side-effect outcome so the UI never implies a workspace change that did not happen."""
+    effect = f" (guild: {side_effect})" if side_effect else ""
+    if transition == PROMOTED:
+        return (
+            f"Promoted after {ratchet_n} consecutive VERIFIED verdicts — write grant added"
+            f"{effect}"
+        )
+    return f"Demoted on {verdict.value} — write grant revoked{effect}"
