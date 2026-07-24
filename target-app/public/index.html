@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tasklight</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">◈</span>
+        <h1>Tasklight</h1>
+      </div>
+      <p class="tagline">A small team task tracker.</p>
+    </header>
+
+    <main class="wrap">
+      <section class="panel" aria-labelledby="add-heading">
+        <h2 id="add-heading">Add a task</h2>
+        <form id="add-form" class="add-form" novalidate>
+          <div class="field field-title">
+            <label for="title">Title</label>
+            <input
+              id="title"
+              name="title"
+              type="text"
+              maxlength="200"
+              placeholder="What needs doing?"
+              autocomplete="off"
+            />
+          </div>
+          <div class="field">
+            <label for="assignee">Assignee</label>
+            <input
+              id="assignee"
+              name="assignee"
+              type="text"
+              maxlength="80"
+              placeholder="Unassigned"
+              autocomplete="off"
+            />
+          </div>
+          <div class="field">
+            <label for="priority">Priority</label>
+            <select id="priority" name="priority">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+            </select>
+          </div>
+          <button type="submit" class="btn btn-primary">Add task</button>
+        </form>
+        <p id="form-error" class="form-error" role="alert" hidden></p>
+      </section>
+
+      <section class="panel" aria-labelledby="list-heading">
+        <div class="list-head">
+          <h2 id="list-heading">
+            Tasks <span id="counter" class="counter">0</span>
+          </h2>
+          <div
+            class="filters"
+            role="group"
+            aria-label="Filter tasks by status"
+          >
+            <button class="filter is-active" data-filter="all">All</button>
+            <button class="filter" data-filter="todo">To do</button>
+            <button class="filter" data-filter="doing">Doing</button>
+            <button class="filter" data-filter="done">Done</button>
+          </div>
+        </div>
+
+        <ul id="task-list" class="task-list"></ul>
+        <p id="empty" class="empty" hidden>No tasks yet. Add one above.</p>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
