@@ -69,3 +69,53 @@ def test_in_scope_bugs_filters_mixed_list():
     miss = BugFinding(title="footer link 404", root_cause="stale route")
     scoped = in_scope_bugs(claim, [hit, miss])
     assert scoped == [hit]
+
+
+# --- word-boundary scope matching (regression) -----------------------------
+
+
+def test_task_id_does_not_substring_match_longer_word():
+    # "t1" must NOT match "test1" — the old substring match wrongly demoted this.
+    claim = _claim("did the work", task_id="t1")
+    bug = BugFinding(title="test1 harness flaky", root_cause="unrelated to t1's scope")
+    # note: root_cause mentions "t1's" -> "t1" on a word boundary, so it IS in scope here;
+    # use a bug that only contains the longer word to prove no spurious match:
+    bug_no_boundary = BugFinding(title="test1 harness flaky", root_cause="the testing rig")
+    assert bug_in_scope(claim, bug_no_boundary) is False
+    assert decide_verdict(claim, _audit(bugs=[bug_no_boundary])) is Verdict.VERIFIED
+
+
+def test_task_id_does_not_match_numeric_extension():
+    # "t1" must NOT match "t10".
+    claim = _claim("did the work", task_id="t1")
+    bug = BugFinding(title="t10 endpoint broken", root_cause="t10 handler throws")
+    assert bug_in_scope(claim, bug) is False
+    assert decide_verdict(claim, _audit(bugs=[bug])) is Verdict.VERIFIED
+
+
+def test_task_id_matches_on_word_boundary():
+    claim = _claim("did the work", task_id="t1")
+    bug = BugFinding(title="t1 endpoint broken", root_cause="handler for t1 throws 500")
+    assert bug_in_scope(claim, bug) is True
+    assert decide_verdict(claim, _audit(bugs=[bug])) is Verdict.FALSE_CLAIM
+
+
+def test_hyphenated_task_id_matches_whole_token():
+    claim = _claim("did it", task_id="task-9")
+    hit = BugFinding(title="task-9 flow fails", root_cause="regression in task-9")
+    miss = BugFinding(title="task-90 flow fails", root_cause="different task-90")
+    assert bug_in_scope(claim, hit) is True
+    assert bug_in_scope(claim, miss) is False
+
+
+def test_descriptive_words_still_substring_match():
+    # Longer descriptive tokens keep substring behavior (checkout in checkouts).
+    claim = _claim("finished the checkout page", task_id="t1")
+    bug = BugFinding(title="checkouts list empty", root_cause="query returns nothing")
+    assert bug_in_scope(claim, bug) is True
+
+
+def test_trailing_punctuation_stripped_from_identifier():
+    claim = _claim("fixed api/todos.", task_id="t1")
+    bug = BugFinding(title="api/todos returns 500", root_cause="null body")
+    assert bug_in_scope(claim, bug) is True

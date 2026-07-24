@@ -32,37 +32,61 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_./-]+")
 
 
 def scope_tokens(claim: Claim) -> set[str]:
-    """The lowercased tokens that define a claim's scope.
+    """The lowercased tokens that define a claim's scope, split by how they must match.
 
-    Always includes the `task_id` (a claim is anchored to its task). Adds meaningful
-    words from the claim text: length > 3, not a stop token — plus any token that looks
-    file-like (contains `/`, `.`, `_`, or `-`), which is kept regardless of length
-    because identifiers like `api/todos` or `list.tsx` are strong scope signals.
+    Returns the union used by callers that don't care about match style. Internally the
+    tokens are partitioned (see `_scope_token_groups`): the task_id and other short
+    identifier-like tokens require whole-word matches (so `t1` never matches `test1` or
+    `t10`), while longer descriptive words match as substrings.
     """
-    tokens: set[str] = set()
+    word, substring = _scope_token_groups(claim)
+    return word | substring
+
+
+def _scope_token_groups(claim: Claim) -> tuple[set[str], set[str]]:
+    """Partition a claim's scope tokens into (word_boundary, substring) match groups.
+
+    * word_boundary — the task_id plus any file-like/identifier token. These are matched
+      with `\\btoken\\b` so a short id like `t1` cannot spuriously match `test1`/`t10`,
+      which previously caused false FALSE_CLAIM demotions.
+    * substring — descriptive words from the claim text (length > 3, not a stop word),
+      matched by containment because natural-language words tolerate it.
+    """
+    word: set[str] = set()
+    substring: set[str] = set()
     if claim.task_id:
-        tokens.add(claim.task_id.lower())
+        word.add(claim.task_id.strip("./-_").lower())
     for raw in _TOKEN_RE.findall(claim.text or ""):
-        token = raw.lower()
-        file_like = any(ch in token for ch in "/._-")
-        if file_like or (len(token) > 3 and token not in _STOP_TOKENS):
-            tokens.add(token)
-    tokens.discard("")
-    return tokens
+        # Strip leading/trailing separators picked up from prose ("todos." -> "todos")
+        # so they don't break the word-boundary match on the real identifier.
+        token = raw.strip("./-_").lower()
+        if not token:
+            continue
+        if any(ch in token for ch in "/._-"):
+            # file-like / compound identifiers: match as whole tokens
+            word.add(token)
+        elif len(token) > 3 and token not in _STOP_TOKENS:
+            substring.add(token)
+    word.discard("")
+    substring.discard("")
+    return word, substring
 
 
 def bug_in_scope(claim: Claim, bug: BugFinding) -> bool:
     """True if `bug` falls within `claim`'s scope.
 
-    A bug is in scope when any of the claim's scope tokens appears (case-insensitive) in
-    the bug's title or root-cause text. If the claim yields no scope tokens at all, every
-    bug is in scope.
+    A bug is in scope when a whole-word scope token (task_id / identifier) matches on a
+    word boundary, or a descriptive scope token appears as a substring, in the bug's
+    title or root-cause text (case-insensitive). If the claim yields no scope tokens at
+    all, every bug is in scope.
     """
-    tokens = scope_tokens(claim)
-    if not tokens:
+    word, substring = _scope_token_groups(claim)
+    if not word and not substring:
         return True
     haystack = f"{bug.title or ''} {bug.root_cause or ''}".lower()
-    return any(token in haystack for token in tokens)
+    if any(token in haystack for token in substring):
+        return True
+    return any(re.search(rf"\b{re.escape(token)}\b", haystack) for token in word)
 
 
 def in_scope_bugs(claim: Claim, bugs: list[BugFinding]) -> list[BugFinding]:
