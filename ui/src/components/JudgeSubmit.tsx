@@ -60,20 +60,36 @@ export function JudgeSubmit({ tasks }: { tasks: TaskOption[] }): JSX.Element {
   return (
     <section className="judge panel" aria-label="Judge-submit claim">
       <div className="judge__pitch">
-        <span className="eyebrow">Public proof path</span>
-        <h2 className="judge__title">Try to lie to it.</h2>
+        <div className="judge__heading">
+          <span className="section-index mono">03</span>
+          <div>
+            <span className="eyebrow">Public proof path</span>
+            <h2 className="judge__title">Put a claim under oath.</h2>
+          </div>
+        </div>
         <p className="judge__sub">
-          A judge claim enters the same Replay audit path as Builder work. It is
-          deliberately isolated from Builder grants and Pioneer training data.
+          Your claim enters the exact Replay audit path used for Builder work—without
+          changing Builder grants or contaminating Pioneer training data.
         </p>
-        <p className="judge__access mono">
-          {accessKey ? "Access key attached." : "A judge or operator key is required."}
-        </p>
+        <div className={`judge__access ${accessKey ? "judge__access--ready" : ""}`}>
+          <span aria-hidden="true">{accessKey ? "✓" : "!"}</span>
+          <p>
+            <strong>{accessKey ? "Access attached" : "Access required"}</strong>
+            <small>
+              {accessKey
+                ? "The claim can enter evidence."
+                : "Verify a judge or operator key above."}
+            </small>
+          </p>
+        </div>
       </div>
 
       <form className="judge__form" onSubmit={(event) => void submit(event)}>
-        <label className="field">
-          <span className="field__label">Task under oath</span>
+        <label className="field judge__task">
+          <span className="field__label">
+            <span className="field__step mono">01</span>
+            Task under oath
+          </span>
           {tasks.length > 0 ? (
             <select
               className="field__input mono"
@@ -100,12 +116,20 @@ export function JudgeSubmit({ tasks }: { tasks: TaskOption[] }): JSX.Element {
         </label>
 
         <label className="field field--claim">
-          <span className="field__label">Completion claim</span>
+          <span className="field__label">
+            <span className="field__step mono">02</span>
+            Completion claim
+            <span className="field__count mono">{claimText.length}/2000</span>
+          </span>
           <textarea
             className="field__input field__input--area mono"
-            placeholder="Describe exactly what you claim is complete."
+            placeholder="State exactly what is complete and ready for Replay to verify."
             value={claimText}
-            onChange={(event) => setClaimText(event.target.value)}
+            maxLength={2000}
+            onChange={(event) => {
+              setClaimText(event.target.value);
+              if (state.kind === "error") setState({ kind: "idle" });
+            }}
             rows={4}
             disabled={busy}
           />
@@ -116,7 +140,8 @@ export function JudgeSubmit({ tasks }: { tasks: TaskOption[] }): JSX.Element {
           type="submit"
           disabled={busy || !accessKey}
         >
-          {busy ? "Entering evidence…" : "Submit for audit"}
+          <span>{busy ? "Entering evidence…" : "Submit for audit"}</span>
+          <span aria-hidden="true">{busy ? "…" : "↗"}</span>
         </button>
 
         {state.kind === "ok" ? (

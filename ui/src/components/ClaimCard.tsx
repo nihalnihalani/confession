@@ -45,7 +45,16 @@ export function ClaimCard({ claim }: { claim: Claim }): JSX.Element {
 
       {claim.auditing ? (
         <div className="claim__scan">
-          <span className="scanbar" aria-hidden="true">
+          <span
+            className="scanbar"
+            role="progressbar"
+            aria-label="Replay audit progress"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={
+              claim.progress !== undefined ? Math.round(claim.progress * 100) : undefined
+            }
+          >
             <span className="scanbar__beam" />
           </span>
           <span className="claim__scanlabel mono">

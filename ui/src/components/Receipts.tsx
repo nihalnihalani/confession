@@ -12,6 +12,7 @@ import type { ReceiptsData } from "../types";
 export function Receipts({ version }: { version: number }): JSX.Element {
   const [data, setData] = useState<ReceiptsData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const mounted = useRef(true);
 
   const load = useCallback(async (): Promise<void> => {
@@ -26,6 +27,7 @@ export function Receipts({ version }: { version: number }): JSX.Element {
         pioneer: body.pioneer ?? [],
       });
       setError(null);
+      setLastUpdated(new Date());
     } catch (e) {
       if (!mounted.current) return;
       setError(e instanceof Error ? e.message : "failed to load receipts");
@@ -48,22 +50,43 @@ export function Receipts({ version }: { version: number }): JSX.Element {
   }, [version, load]);
 
   return (
-    <section className="receipts" aria-label="Receipts">
+    <section className="receipts" aria-label="Receipts" aria-busy={!data && !error}>
       <header className="receipts__head">
-        <h2 className="receipts__title">Receipts</h2>
-        <p className="receipts__sub">Nothing here requires trusting us.</p>
-        {error ? <span className="receipts__err mono">offline: {error}</span> : null}
+        <div className="receipts__heading">
+          <span className="section-index mono">02</span>
+          <div>
+            <span className="eyebrow">External proof / live links</span>
+            <h2 className="receipts__title">Receipts, not promises.</h2>
+          </div>
+        </div>
+        <div className="receipts__status mono">
+          {error ? (
+            <span className="receipts__err">Offline · {error}</span>
+          ) : lastUpdated ? (
+            <span>Updated {formatClock(lastUpdated)}</span>
+          ) : (
+            <span>Loading live receipts…</span>
+          )}
+          <span className="receipts__pulse" aria-hidden="true" />
+        </div>
       </header>
 
       <div className="receipts__cols">
         <div className="rcol">
-          <h3 className="rcol__title">Replay</h3>
-          {!data || data.replay.length === 0 ? (
-            <p className="rcol__empty">No verdicts recorded yet.</p>
+          <ProviderHead
+            number="01"
+            name="Replay"
+            description="Independent QA verdicts"
+            count={data?.replay.length}
+          />
+          {!data ? (
+            <ReceiptLoading />
+          ) : data.replay.length === 0 ? (
+            <ReceiptEmpty label="No verdicts recorded yet." />
           ) : (
             <ul className="rcol__list">
               {data.replay.map((r, i) => (
-                <li className="rrow" key={`${r.report_url}-${i}`}>
+                <li className="rrow" key={r.claim_id ?? `${r.report_url}-${i}`}>
                   <a className="rrow__link mono" href={r.report_url} target="_blank" rel="noreferrer">
                     {shortUrl(r.report_url)}
                   </a>
@@ -78,9 +101,16 @@ export function Receipts({ version }: { version: number }): JSX.Element {
         </div>
 
         <div className="rcol">
-          <h3 className="rcol__title">Guild</h3>
-          {!data || data.guild.length === 0 ? (
-            <p className="rcol__empty">No tier state yet.</p>
+          <ProviderHead
+            number="02"
+            name="Guild"
+            description="Auditable tool grants"
+            count={data?.guild.length}
+          />
+          {!data ? (
+            <ReceiptLoading />
+          ) : data.guild.length === 0 ? (
+            <ReceiptEmpty label="No tier state yet." />
           ) : (
             <ul className="rcol__list">
               {data.guild.map((g, i) => (
@@ -103,9 +133,16 @@ export function Receipts({ version }: { version: number }): JSX.Element {
         </div>
 
         <div className="rcol">
-          <h3 className="rcol__title">Pioneer</h3>
-          {!data || data.pioneer.length === 0 ? (
-            <p className="rcol__empty">No training jobs yet.</p>
+          <ProviderHead
+            number="03"
+            name="Pioneer"
+            description="Fine-tune lineage"
+            count={data?.pioneer.length}
+          />
+          {!data ? (
+            <ReceiptLoading />
+          ) : data.pioneer.length === 0 ? (
+            <ReceiptEmpty label="No training jobs yet." />
           ) : (
             <ul className="rcol__list">
               {data.pioneer.map((p, i) => (
@@ -126,6 +163,48 @@ export function Receipts({ version }: { version: number }): JSX.Element {
   );
 }
 
+function ProviderHead({
+  number,
+  name,
+  description,
+  count,
+}: {
+  number: string;
+  name: string;
+  description: string;
+  count?: number;
+}): JSX.Element {
+  return (
+    <header className="rcol__head">
+      <span className="rcol__number mono">{number}</span>
+      <span>
+        <h3 className="rcol__title">{name}</h3>
+        <small>{description}</small>
+      </span>
+      <span className="rcol__count mono">{count ?? "—"}</span>
+    </header>
+  );
+}
+
+function ReceiptEmpty({ label }: { label: string }): JSX.Element {
+  return (
+    <div className="rcol__empty">
+      <span aria-hidden="true">○</span>
+      <p>{label}</p>
+      <small>Real evidence will appear automatically.</small>
+    </div>
+  );
+}
+
+function ReceiptLoading(): JSX.Element {
+  return (
+    <div className="rcol__empty rcol__empty--loading">
+      <span className="loading-ring" aria-hidden="true" />
+      <p>Reading the evidence ledger…</p>
+    </div>
+  );
+}
+
 function shortUrl(url: string): string {
   try {
     const u = new URL(url);
@@ -139,4 +218,12 @@ function fmt(ts: string): string {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return ts;
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatClock(date: Date): string {
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }

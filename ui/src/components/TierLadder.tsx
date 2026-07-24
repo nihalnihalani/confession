@@ -17,9 +17,21 @@ export function TierLadder({
 
   return (
     <section className="ladder" aria-label="Tool-grant tiers">
-      <h2 className="rail__title">Tool grants</h2>
+      <header className="ladder__head">
+        <div>
+          <span className="eyebrow">Guild / capability boundary</span>
+          <h2 className="rail__title">Tool grants</h2>
+        </div>
+        <span className="ladder__count mono">{agents.length}</span>
+      </header>
       {agents.length === 0 ? (
-        <p className="rail__empty">No agents yet. Tiers appear as claims are audited.</p>
+        <div className="rail__empty">
+          <span className="rail__empty-icon" aria-hidden="true">
+            —
+          </span>
+          <p>No agents under policy yet.</p>
+          <small>Tiers appear after a Builder claim enters evidence.</small>
+        </div>
       ) : (
         <ul className="ladder__list">
           {agents.map((agent) => (
@@ -40,7 +52,10 @@ function AgentTier({ agent }: { agent: TierState }): JSX.Element {
   return (
     <li className={`atier atier--${agent.current.toLowerCase()}`}>
       <div className="atier__head">
-        <span className="atier__agent mono">{agent.agent_id}</span>
+        <span>
+          <small className="mono">Agent</small>
+          <strong className="atier__agent mono">{agent.agent_id}</strong>
+        </span>
         <span className={`atier__badge ${atL1 ? "atier__badge--l1" : "atier__badge--l0"}`}>
           {agent.current}
         </span>
@@ -112,10 +127,27 @@ function Rung({
       className={`rung ${active ? "rung--active" : ""} ${animate ? `rung--${animate}` : ""}`}
     >
       <span className="rung__icon" aria-hidden="true">
-        {icon === "lock" ? "🔒" : "🔑"}
+        <TierGlyph icon={icon} />
       </span>
       <span className="rung__label">{label}</span>
       <span className="rung__sub">{sub}</span>
     </div>
+  );
+}
+
+function TierGlyph({ icon }: { icon: "lock" | "key" }): JSX.Element {
+  if (icon === "lock") {
+    return (
+      <svg viewBox="0 0 20 20">
+        <rect x="4" y="9" width="12" height="8" rx="1" />
+        <path d="M7 9V6.5a3 3 0 0 1 6 0V9" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 20 20">
+      <circle cx="7" cy="8" r="3.5" />
+      <path d="m9.5 10.5 6 6m-2-2 1.8-1.8m-4 0 1.8-1.8" />
+    </svg>
   );
 }

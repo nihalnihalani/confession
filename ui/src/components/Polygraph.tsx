@@ -7,9 +7,11 @@ import type { Verdict } from "../types";
 export function Polygraph({
   lastVerdict,
   auditing,
+  activeAudits,
 }: {
   lastVerdict?: { verdict: Verdict; at: string };
   auditing: boolean;
+  activeAudits: number;
 }): JSX.Element {
   const verdict = lastVerdict?.verdict;
   const angle = verdict === "FALSE_CLAIM" ? 46 : verdict === "VERIFIED" ? -42 : 0;
@@ -24,18 +26,31 @@ export function Polygraph({
 
   return (
     <div className={`polygraph polygraph--${state}`}>
-      <div className="polygraph__caption">
-        <span className="eyebrow">Live evidence instrument</span>
-        <strong>
+      <header className="polygraph__caption">
+        <div>
+          <span className="eyebrow">Live evidence instrument</span>
+          <strong aria-live="polite">
+            {state === "false"
+              ? "DECEPTION DETECTED"
+              : state === "verified"
+                ? "CLAIM VERIFIED"
+                : state === "auditing"
+                  ? "REPLAY MEASURING"
+                  : "AWAITING SIGNAL"}
+          </strong>
+        </div>
+        <span className="polygraph__meta mono">
           {state === "false"
-            ? "DECEPTION DETECTED"
+            ? "Verdict: false claim"
             : state === "verified"
-              ? "CLAIM VERIFIED"
-              : state === "auditing"
-                ? "REPLAY MEASURING"
-                : "AWAITING SIGNAL"}
-        </strong>
-      </div>
+              ? "Verdict: verified"
+              : auditing
+                ? `${activeAudits} active audit${activeAudits === 1 ? "" : "s"}`
+                : lastVerdict
+                  ? `Last verdict ${formatTime(lastVerdict.at)}`
+                  : "No verdict recorded"}
+        </span>
+      </header>
       <svg
         viewBox="0 0 320 180"
         className="polygraph__svg"
@@ -63,6 +78,11 @@ export function Polygraph({
           <circle cx="0" cy="0" r="7" className="polygraph__hub" />
         </g>
       </svg>
+      <div className="polygraph__scale mono" aria-hidden="true">
+        <span>Verified</span>
+        <span>Pending</span>
+        <span>False claim</span>
+      </div>
     </div>
   );
 }
@@ -76,4 +96,10 @@ function tracePath(angle: number): string {
     points.push(`${x},${y.toFixed(1)}`);
   }
   return `M ${points.join(" L ")}`;
+}
+
+function formatTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
