@@ -15,16 +15,18 @@ CONFESSION is a lie detector for AI agents: a Builder agent claims a task is don
 ## Commands
 ```bash
 cp .env.example .env                    # fill keys; Replay promo code HACKATHON in Replay settings
-npm install && npm run dev              # dashboard (ui/) → http://localhost:5173
-npm run build                           # must pass before committing UI changes
-uvicorn app.server:app --port 8000      # engine (engine/): REST + WS event stream
-python -m confession.cli audit <claim>  # run one full audit cycle from the CLI
-npm run receipts                        # regenerates the live receipts page from CURRENT state
+cd ui && npm install && npm run dev     # dashboard → http://localhost:5173
+cd ui && npm run build                  # must pass before committing UI changes
+python3 -m uvicorn confession.server:app --app-dir engine --port 8000   # engine: REST + WS
+python3 -m confession.cli audit --claim "T3 done" --target-url $TARGET_APP_URL   # one real audit cycle
+python3 -m confession.cli builder --task T3        # autonomous loop: real Guild agent claims, then audited
+curl -s localhost:8000/api/receipts | python3 -m json.tool               # live proof state
+(cd engine && python3 -m pytest tests -q)          # 80 unit tests, no keys needed
 npx --yes @guildai/cli@latest session list --workspace confession/confession --json   # judge dump
 ```
 
 ## Repo map
-- `engine/confession/` — `builder.py` (task loop → the agent that claims), `auditor.py` (claim → Replay project → poll → verdict), `tiers.py` (Guild promote/demote calls), `trainer.py` (caught-lie → Pioneer dataset/fine-tune), `events.py` (WS event bus), `server.py`, `cli.py`
+- `engine/confession/` — `builder.py` (autonomous loop: real Guild agent claims), `reaudit.py` (PENDING re-audit loop), `auditor.py` (claim → Replay project → poll → verdict), `tiers.py` (Guild promote/demote calls), `trainer.py` (caught-lie → Pioneer dataset/fine-tune), `events.py` (WS event bus), `server.py`, `cli.py`
 - `target-app/` — the real deployed CRUD app the Builder works on (its own repo history is the proof the tasks are real)
 - `guild-agents/` — Guild agent packages: `builder-l0/` (read-only grant), `builder-l1/` (write grant), `auditor/` (Replay-call + revoke/promote tools)
 - `ui/` — React dashboard: claim card, polygraph verdict, tier ladder, receipts page; `src/types.ts` is the authoritative event contract
