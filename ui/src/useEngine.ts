@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef } from "react";
+import { apiFetch, engineWebSocketUrl } from "./api";
 import type {
   Claim,
   ConnectionStatus,
@@ -10,7 +11,7 @@ import type {
 
 /**
  * The single source of UI truth. Every field here is folded from real engine
- * events — there is NO synthetic data path. When the socket is down we surface
+ * events — there is no invented data path. When the socket is down we surface
  * a real "engine offline" status rather than inventing anything.
  */
 export interface EngineState {
@@ -67,6 +68,10 @@ function ensureTier(tiers: Record<string, TierState>, agentId: string): TierStat
 
 /** Fold one event into state. Pure — the same events always yield the same state. */
 function applyEvent(state: EngineState, event: EngineEvent): EngineState {
+  const identity = eventIdentity(event);
+  if (state.events.some((existing) => eventIdentity(existing) === identity)) {
+    return state;
+  }
   const events = [event, ...state.events].slice(0, MAX_EVENTS);
   const base = { ...state, events };
 
@@ -125,25 +130,15 @@ function applyEvent(state: EngineState, event: EngineEvent): EngineState {
         project_url: existing?.project_url,
         target_url: existing?.target_url,
         status: event.verdict,
-        auditing: event.verdict === "PENDING",
+        auditing: false,
         progress: existing?.progress,
-        progress_message: existing?.progress_message,
         report_url: event.report_url ?? existing?.report_url,
         bugs: event.bugs ?? existing?.bugs ?? [],
         verdict_at: event.timestamp,
+        progress_message:
+          event.message ??
+          (event.verdict === "PENDING" ? "Queued for bounded re-audit." : undefined),
       };
-
-      // Streak is derived from real verdicts: VERIFIED increments, any other
-      // resets. Tier changes themselves arrive as their own tier_changed event.
-      const tiers = { ...state.tiers };
-      const prev = ensureTier(tiers, event.agent_id);
-      const streak =
-        event.verdict === "VERIFIED"
-          ? prev.streak + 1
-          : event.verdict === "FALSE_CLAIM"
-            ? 0
-            : prev.streak;
-      tiers[event.agent_id] = { ...prev, streak };
 
       const lastVerdict =
         event.verdict === "PENDING"
@@ -153,7 +148,6 @@ function applyEvent(state: EngineState, event: EngineEvent): EngineState {
       return {
         ...base,
         claims: upsertClaim(state.claims, claim),
-        tiers,
         lastVerdict,
       };
     }
@@ -166,8 +160,20 @@ function applyEvent(state: EngineState, event: EngineEvent): EngineState {
         current: event.to,
         lastReason: event.reason,
         lastChange: { from: event.from, to: event.to, at: event.timestamp },
-        // A demotion zeroes the ratchet; a promotion consumed the streak.
-        streak: event.to === "L0" ? 0 : 0,
+        streak: 0,
+      };
+      return { ...base, tiers };
+    }
+
+    case "tier_state": {
+      const tiers = { ...state.tiers };
+      const previous = ensureTier(tiers, event.agent_id);
+      tiers[event.agent_id] = {
+        ...previous,
+        current: event.current,
+        streak: event.streak,
+        pendingAction: event.pending_action,
+        error: event.error,
       };
       return { ...base, tiers };
     }
@@ -242,11 +248,6 @@ function reducer(state: EngineState, action: Action): EngineState {
   }
 }
 
-function wsUrl(): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${window.location.host}/ws`;
-}
-
 function isEngineEvent(value: unknown): value is EngineEvent {
   return (
     typeof value === "object" &&
@@ -274,7 +275,7 @@ export function useEngine(): EngineState {
     // stream — we never substitute invented history.
     void (async () => {
       try {
-        const res = await fetch("/events", { headers: { Accept: "application/json" } });
+        const res = await apiFetch("/events");
         if (!res.ok) throw new Error(`hydrate ${res.status}`);
         const body: unknown = await res.json();
         const list = Array.isArray(body)
@@ -295,7 +296,7 @@ export function useEngine(): EngineState {
 
       let socket: WebSocket;
       try {
-        socket = new WebSocket(wsUrl());
+        socket = new WebSocket(engineWebSocketUrl());
       } catch {
         scheduleReconnect();
         return;
@@ -345,4 +346,19 @@ export function useEngine(): EngineState {
   }, []);
 
   return state;
+}
+
+function eventIdentity(event: EngineEvent): string {
+  const record = event as EngineEvent & {
+    claim_id?: string;
+    agent_id?: string;
+    job_id?: string;
+  };
+  return [
+    event.type,
+    event.timestamp,
+    record.claim_id ?? "",
+    record.agent_id ?? "",
+    record.job_id ?? "",
+  ].join(":");
 }

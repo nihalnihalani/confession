@@ -16,7 +16,7 @@ test -f .env && grep -q '^REPLAY_API_TOKEN=lqa_' .env && echo "replay token ok"
 curl -sS "$TARGET_APP_URL/api/health" | grep -q '"ok":true' && echo "target app live"
 
 # Guild workspace + agents present, starting tier pinned
-npx --yes @guildai/cli@latest workspace agent list --workspace confession/confession --json
+npx --yes @guildai/cli@0.12.3 workspace agent list --workspace confession/confession --json
 
 # No orphan Replay projects from earlier runs
 curl -sS "${REPLAY_BASE_URL:-https://qa.replay.io}/api/v1/projects" \
@@ -47,17 +47,21 @@ Open the dashboard. The claim feed, tier ladder, polygraph, and receipts panels 
 
 ---
 
-## 2. Run one real audit cycle (internal claim)
+## 2. Run one real autonomous Builder cycle
 
-Give the Builder a real task from `target-app/TASKS.md` and let it claim. From the CLI:
+Give the Builder a real task from `target-app/TASKS.md`. Its real Guild stdout must end
+with the deployed `target_url` and evidence URL before the engine will audit a `done`
+claim:
 
 ```bash
-.venv/bin/python -m confession.cli audit \
-  --claim "T3 done" \
-  --target-url "$TARGET_APP_URL"
+.venv/bin/python -m confession.cli builder --task T3
 ```
 
-Watch the dashboard: `claim.received → audit.started → audit.progress… → verdict.reached → tier.changed`. The verdict is whatever Replay actually returns — VERIFIED or FALSE_CLAIM. If it is a FALSE_CLAIM, that is a real catch; it demotes the agent and logs the lie. **Do not re-run to "get a nicer" verdict** — collect real catches by running the loop repeatedly from earlier in the day.
+Watch the dashboard: `claim_submitted → audit_started → audit_progress… →
+verdict_reached → tier_state`, with `tier_changed` only after Guild confirms a grant
+transition. The verdict is whatever Replay actually returns — VERIFIED, FALSE_CLAIM, or
+PENDING. If it is a FALSE_CLAIM, that is a real catch; it demotes the agent and logs the
+lie. Do not re-run to get a preferred verdict.
 
 If Replay reports bugs you did not expect in the target app, FIX THEM before submission (Replay judges favor "QA completed and all discovered bugs fixed"), then re-audit.
 
@@ -73,10 +77,16 @@ The judge submits their own claim; it runs the identical pipeline, zero human to
 ```bash
 curl -sS -X POST http://localhost:8000/api/claims \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CONFESSION_JUDGE_KEY" \
+  -H "Idempotency-Key: judge-demo-$(date +%s)" \
   -d '{"agent_id":"judge","task_id":"T5","claim_text":"T5 done — search filter implemented and tested"}'
 ```
 
-Narrate: claim → Replay explores the real app → verdict → Guild tier change, all on live data. Close by quoting the criterion back: *"everything you watched acted on live data with zero human clicks."* The receipts page (Replay report URLs + Guild session JSON + Pioneer job ID, dumped from live state) is on screen the whole time.
+Narrate: claim → Replay explores the real app → verdict, all on live data. Judge claims
+intentionally never change Builder grants or enter Pioneer; that prevents a judge from
+spoofing Builder behavior. The autonomous Builder path above is the one that drives
+Guild and Pioneer consequences. Close by quoting the criterion back: *"everything you
+watched acted on live data with zero human clicks."* Keep the real receipts in frame.
 
 ---
 

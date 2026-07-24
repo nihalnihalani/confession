@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from confession.events import EventBus
-from confession.models import EventType
+from confession.models import Event, EventType
 
 
 def test_ring_buffer_is_bounded():
@@ -84,6 +84,25 @@ def test_every_event_is_timestamped():
         event = await bus.emit(EventType.RECEIPTS_UPDATED, ok=True)
         assert event.timestamp is not None
         assert event.payload == {"ok": True}
+
+    asyncio.run(scenario())
+
+
+def test_sink_persists_before_delivery_and_restore_does_not_duplicate():
+    async def scenario():
+        persisted = []
+
+        async def sink(event):
+            persisted.append(event)
+
+        bus = EventBus(sink=sink)
+        event = await bus.emit(EventType.CLAIM_SUBMITTED, claim_id="c1")
+        assert persisted == [event]
+
+        restored = Event(type=EventType.AUDIT_STARTED, payload={"claim_id": "c0"})
+        bus.restore([restored])
+        assert bus.history() == [restored]
+        assert persisted == [event]
 
     asyncio.run(scenario())
 

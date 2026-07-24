@@ -26,9 +26,8 @@ This document is the system design. Every number cited anywhere in the project m
    │              ENGINE (engine/)        │ │ claim JSON      │ bug report
    │                                      │ │  +report        │ (real URLs)
    │  builder.py   task loop → claim      │ │                 ▼
-   │  auditor.py   claim → Replay → poll ─┼─┼──────────►┌──────────────────┐
-   │  auditor(Guild) verdict rationale ◄──┼─┼───────────│  Guild Auditor   │
-   │  tiers.py     Guild promote/demote   │ │           │  agent (RO)      │
+   │  auditor.py   claim → Replay → poll ─┼─┼──────────►│ scope verdict    │
+   │  tiers.py     Guild promote/demote   │ │           │ (deterministic)  │
    │  trainer.py   caught lie → Pioneer   │ │           └──────────────────┘
    │  events.py    WS event bus  ─────────┼─┘
    │  server.py    REST + WS + judge-submit
@@ -48,12 +47,11 @@ Lanes are physical: `target-app/`, `guild-agents/`, `engine/`, `ui/`. The Builde
 ## The audit sequence
 
 ```
-Builder → engine        POST claim {task_id, tier, summary, pr_url?}
+Builder → engine        real Guild stdout → parsed claim block + deployed target URL
 engine  → Replay        POST /api/v1/projects {name, target_url=TARGET_APP_URL}
 Replay                  explores the live app (AI exploration of the claimed scope)
 engine  → Replay        poll GET /projects/{id}/timing until finished_at != null
 engine  → Replay        GET  /projects/{id}/bugs   (verbatim titles, root-cause, URLs)
-engine  → Guild Auditor  claim block + bug-report JSON  → {verdict, rationale, cited_bugs[]}
 engine (verdict handler) apply verdict:
                           VERIFIED    → ratchet++  ; at threshold → Guild promote L0→L1
                           FALSE_CLAIM → ratchet=0  ; Guild demote L1→L0 (revoke write tools)
@@ -62,7 +60,10 @@ engine (verdict handler) apply verdict:
 engine  → ui            emit events over WS at every state transition
 ```
 
-Every Replay project the engine creates is tracked and cleaned up (or reused idempotently) so no orphan projects remain before judging.
+Replay project names are deterministic per `claim_id`. Before creation the engine lists
+projects and reuses a matching project; once created, the real project ID is checkpointed
+to SQLite before polling. PENDING re-audits and restart recovery resume that same project
+instead of creating another one.
 
 ## Verdict rules (non-negotiable)
 
@@ -72,7 +73,7 @@ Three states, no fourth, no manual override path in code:
 |---|---|---|
 | `VERIFIED` | claim `done` AND Replay report has **zero** open bugs on the claimed scope | ratchet++ ; promote at threshold |
 | `FALSE_CLAIM` | claim `done` AND Replay report has **≥1** bug on the claimed scope | demote immediately ; log lie for Pioneer |
-| `PENDING` | Replay report missing/incomplete or infra error (timeout/5xx); or claim was `blocked` | no tier change ; re-audit |
+| `PENDING` | Replay report missing/incomplete or infra error (timeout/5xx) | no tier change ; bounded re-audit |
 
 The oracle is Replay's verdict — never a human click, never the agent's self-report, never a heuristic score. Replay's bug titles and root-cause text are reported verbatim, linked by URL; a verdict is never summarized into something stronger than the report supports.
 
@@ -102,15 +103,19 @@ The React dashboard consumes a WS event stream. `ui/src/types.ts` is the authori
 
 | Event | Emitted when | Key fields |
 |---|---|---|
-| `claim_submitted` | Builder submits a claim (internal or judge) | `task_id`, `tier`, `summary`, `pr_url?`, `source` |
-| `audit_started` | engine creates the Replay project | `claim_id`, `project_id`, `target_url` |
-| `audit_progress` | poll tick while Replay explores | `claim_id`, `elapsed_ms`, `phase` |
-| `verdict_reached` | Auditor returns a verdict | `claim_id`, `verdict`, `rationale`, `cited_bugs[]`, `report_url` |
-| `tier_changed` | verdict handler applies a grant change | `agent`, `from`, `to`, `reason`, `ratchet` |
-| `lie_recorded` | a `FALSE_CLAIM` is recorded for training | `claim_id`, `bug_titles[]` |
-| `training_status` | Pioneer dataset/fine-tune status changes | `job_id`, `state` |
+| `claim_submitted` | Builder or judge submits a claim | `claim_id`, `agent_id`, `task_id`, `claim_text` |
+| `audit_started` | engine creates or resumes the Replay project | `claim_id`, `project_url`, `target_url` |
+| `audit_progress` | poll tick while Replay explores | `claim_id`, `message`, `progress?` |
+| `verdict_reached` | Auditor returns a verdict | `claim_id`, `agent_id`, `verdict`, `bugs[]`, `report_url?` |
+| `tier_state` | ratchet or pending Guild action changes | `agent_id`, `current`, `streak`, `pending_action?`, `error?` |
+| `tier_changed` | Guild confirms a grant change | `agent_id`, `from`, `to`, `reason` |
+| `lie_recorded` | a Builder `FALSE_CLAIM` is recorded | `claim_id`, `agent_id`, `root_cause`, `report_url?` |
+| `training_started` / `training_status` | Pioneer job changes | `job_id`, `status`, `model_id?` |
+| `receipts_updated` | durable receipt state changes | timestamp only |
 
-`source` distinguishes internal claims from judge-submitted ones, but both run the identical pipeline — the judge-submit endpoint is one code path with zero special-casing, which is the Autonomy-axis proof.
+Builder and judge claims use the same Auditor implementation. Judge identities are
+deliberately non-ratcheting and never feed Pioneer, because a judge's test input is not
+Builder behavior.
 
 ## Trust boundary — the referee's independence is the product
 

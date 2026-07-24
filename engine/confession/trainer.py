@@ -7,8 +7,9 @@ training examples that teach an agent to report honestly instead of over-claimin
 job -> poll) and appends every real response — job ids, statuses — to
 `engine/state/training.jsonl`.
 
-Nothing here fires automatically. `run_finetune` requires PIONEER_API_KEY (a
-`PioneerClient` is constructed lazily); without it the caller gets `PioneerNotConfigured`.
+The server may start `run_finetune` automatically at the configured caught-lie threshold.
+It requires PIONEER_API_KEY (a `PioneerClient` is constructed lazily); without it the
+caller gets `PioneerNotConfigured`.
 """
 
 from __future__ import annotations
@@ -39,7 +40,12 @@ class Trainer:
         self._training_path = training_path or (state / "training.jsonl")
         self._bus = bus
         self._pioneer = pioneer
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
+
+    def _active_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     # -- caught-lie ledger --------------------------------------------------
 
@@ -54,7 +60,7 @@ class Trainer:
             "root_cause": root_cause,
             "report_url": report_url,
         }
-        async with self._lock:
+        async with self._active_lock():
             await asyncio.to_thread(_append_jsonl, self._lies_path, record)
         if self._bus is not None:
             # lie_recorded contract (ui/src/types.ts): {claim_id, agent_id, claim_text,
@@ -142,6 +148,7 @@ class Trainer:
         if not examples:
             raise ValueError("No caught lies recorded yet — nothing to fine-tune on.")
         client = self._client()
+        await client.validate_base_model(base_model)
         name = dataset_name or f"confession-lies-{version}"
 
         async def _record(kind: str, response: Any) -> None:

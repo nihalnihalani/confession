@@ -1,0 +1,10 @@
+.git
+.env
+.venv
+**/__pycache__
+**/*.pyc
+**/node_modules
+ui/dist
+engine/state
+target-app/data
+measured-local

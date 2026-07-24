@@ -1,5 +1,7 @@
 """Unit tests for the tier ratchet — pure transition logic and persistence roundtrip."""
 
+import asyncio
+
 from confession.models import TierState, Verdict
 from confession.tiers import DEMOTED, PROMOTED, TierManager, next_tier_state
 
@@ -112,3 +114,49 @@ def test_get_unknown_agent_is_l0():
     fresh = manager.get("never-seen")
     assert fresh.tier == 0
     assert fresh.streak == 0
+
+
+def test_failed_promotion_stays_l0_until_guild_confirms(tmp_path):
+    async def scenario():
+        manager = TierManager(
+            state_path=tmp_path / "tiers.json",
+            ratchet_n=1,
+            workspace="owner/workspace",
+            l1_agent="owner~builder-l1",
+        )
+        outcomes = iter(["guild_cli_error", "guild_agent_added"])
+
+        async def effect(_transition):
+            return next(outcomes)
+
+        manager._run_guild_side_effect = effect
+        state = await manager.apply_verdict("builder", Verdict.VERIFIED)
+        assert state.tier == 0
+        assert state.pending_guild_action == PROMOTED
+        assert manager.has_pending_actions() is True
+
+        assert await manager.reconcile_pending() == 1
+        state = manager.get("builder")
+        assert state.tier == 1
+        assert state.pending_guild_action is None
+
+    asyncio.run(scenario())
+
+
+def test_failed_demotion_fails_closed_locally(tmp_path):
+    async def scenario():
+        path = tmp_path / "tiers.json"
+        manager = TierManager(state_path=path, ratchet_n=1)
+        manager._states["builder"] = TierState(agent_id="builder", tier=1)
+        manager._save()
+
+        async def effect(_transition):
+            return "guild_cli_unavailable"
+
+        manager._run_guild_side_effect = effect
+        state = await manager.apply_verdict("builder", Verdict.FALSE_CLAIM)
+        assert state.tier == 0
+        assert state.pending_guild_action == DEMOTED
+        assert state.guild_error == "guild_cli_unavailable"
+
+    asyncio.run(scenario())

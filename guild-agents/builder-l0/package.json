@@ -1,7 +1,7 @@
 {
   "name": "@guildai/confession~confession-builder-l0",
   "version": "1.0.0",
-  "description": "CONFESSION Builder (L0 — observation tier): read-only grant, proposes diffs in text only.",
+  "description": "CONFESSION Builder (L0 — observation tier): read-only grant, attests only to already-deployed work.",
   "private": true,
   "main": "agent.ts",
   "dependencies": {

@@ -8,9 +8,8 @@ Two tiers: L0 (read-only grant) and L1 (write grant). The ratchet:
 The pure state transition (`next_tier_state`) has no IO and is exhaustively unit-tested.
 `TierManager` adds durable JSON persistence (atomic writes) and the real Guild side
 effect: on promotion/demotion it adds/removes the L1 agent in the Guild workspace via the
-`@guildai/cli` binary. If that CLI is unavailable, the failure is recorded honestly as
-`side_effect="guild_cli_unavailable"` in the event and history — local tier state still
-advances, but nothing pretends the workspace changed when it did not.
+pinned Guild CLI package. A failed transition is persisted for bounded reconciliation;
+promotion stays at L0 and demotion fails closed at L0 until Guild confirms the effect.
 """
 
 from __future__ import annotations
@@ -91,9 +90,17 @@ class TierManager:
         self._ratchet_n = ratchet_n if ratchet_n is not None else config.ratchet_n()
         self._workspace = workspace or config.GUILD_WORKSPACE
         self._l1_agent = l1_agent or config.GUILD_L1_AGENT
-        self._lock = asyncio.Lock()
+        # Created lazily inside the active event loop. Python 3.9 binds locks at
+        # construction time, while FastAPI app factories are commonly called before the
+        # server loop starts.
+        self._lock: Optional[asyncio.Lock] = None
         self._states: dict[str, TierState] = {}
         self._load()
+
+    def _active_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     # -- persistence --------------------------------------------------------
 
@@ -128,6 +135,9 @@ class TierManager:
     def all_states(self) -> dict[str, TierState]:
         return dict(self._states)
 
+    def has_pending_actions(self) -> bool:
+        return any(state.pending_guild_action for state in self._states.values())
+
     # -- the one write path -------------------------------------------------
 
     async def apply_verdict(self, agent_id: str, verdict: Verdict) -> TierState:
@@ -135,7 +145,7 @@ class TierManager:
         and emit a `tier_changed` event on any transition. This is the ONLY place tier
         state changes — Guild promote/demote must never be called from anywhere else.
         """
-        async with self._lock:
+        async with self._active_lock():
             current = self.get(agent_id)
             new_state, transition = next_tier_state(current, verdict, self._ratchet_n)
 
@@ -145,6 +155,28 @@ class TierManager:
                 # Record the real side-effect outcome on the just-appended history entry.
                 if new_state.history:
                     new_state.history[-1]["side_effect"] = side_effect
+                if not _guild_effect_succeeded(side_effect):
+                    # Promotion fails closed at L0. Demotion also fails closed locally at
+                    # L0 so the Builder cannot invoke write tools while Guild revocation
+                    # is retried. No tier_changed event is emitted until Guild confirms.
+                    new_state.pending_guild_action = transition
+                    new_state.pending_from_tier = current.tier
+                    new_state.pending_attempts = 1
+                    new_state.guild_error = side_effect
+                    if transition == PROMOTED:
+                        new_state.tier = current.tier
+                        new_state.streak = self._ratchet_n
+                    if new_state.history:
+                        new_state.history[-1]["tier"] = new_state.tier
+                        new_state.history[-1]["streak"] = new_state.streak
+                        new_state.history[-1]["transition"] = None
+                        new_state.history[-1]["pending_guild_action"] = transition
+                    transition = None
+                else:
+                    new_state.pending_guild_action = None
+                    new_state.pending_from_tier = None
+                    new_state.pending_attempts = 0
+                    new_state.guild_error = None
 
             self._states[agent_id] = new_state
             self._save()
@@ -164,23 +196,96 @@ class TierManager:
                         },
                     )
                 )
+            if self._bus is not None:
+                await self._emit_tier_state(new_state)
             return new_state
+
+    async def reconcile_pending(self) -> int:
+        """Retry bounded pending Guild transitions and emit only confirmed changes."""
+        reconciled = 0
+        async with self._active_lock():
+            for agent_id, current in list(self._states.items()):
+                action = current.pending_guild_action
+                if not action or current.pending_attempts >= config.guild_reconcile_max_attempts():
+                    continue
+                side_effect = await self._run_guild_side_effect(action)
+                next_state = current.model_copy(deep=True)
+                next_state.pending_attempts += 1
+                next_state.guild_error = None if _guild_effect_succeeded(side_effect) else side_effect
+                if not _guild_effect_succeeded(side_effect):
+                    self._states[agent_id] = next_state
+                    continue
+
+                from_tier = next_state.pending_from_tier
+                next_state.tier = 1 if action == PROMOTED else 0
+                next_state.streak = 0
+                next_state.pending_guild_action = None
+                next_state.pending_from_tier = None
+                next_state.pending_attempts = 0
+                next_state.history.append(
+                    {
+                        "at": utcnow().isoformat(),
+                        "action": "guild_reconciled",
+                        "transition": action,
+                        "tier": next_state.tier,
+                        "side_effect": side_effect,
+                    }
+                )
+                self._states[agent_id] = next_state
+                reconciled += 1
+
+                if self._bus is not None:
+                    await self._bus.publish(
+                        Event(
+                            type=EventType.TIER_CHANGED,
+                            payload={
+                                "agent_id": agent_id,
+                                "from": tier_label(
+                                    from_tier if from_tier is not None else current.tier
+                                ),
+                                "to": tier_label(next_state.tier),
+                                "reason": _tier_reason(
+                                    action,
+                                    Verdict.VERIFIED
+                                    if action == PROMOTED
+                                    else Verdict.FALSE_CLAIM,
+                                    side_effect,
+                                    self._ratchet_n,
+                                ),
+                            },
+                        )
+                    )
+                    await self._emit_tier_state(next_state)
+            self._save()
+        return reconciled
+
+    async def _emit_tier_state(self, state: TierState) -> None:
+        if self._bus is None:
+            return
+        await self._bus.emit(
+            EventType.TIER_STATE,
+            agent_id=state.agent_id,
+            current=tier_label(state.tier),
+            streak=state.streak,
+            pending_action=state.pending_guild_action,
+            error=state.guild_error,
+        )
 
     async def _run_guild_side_effect(self, transition: str) -> str:
         """Add (promote) or remove (demote) the L1 agent in the Guild workspace.
 
-        Runs `npx --yes @guildai/cli@latest workspace agent <add|remove> <l1_agent>
+        Runs `npx --yes <GUILD_CLI_PACKAGE> workspace agent <add|remove> <l1_agent>
         --workspace <workspace>` in a thread (subprocess is blocking). Returns a short
         status string recorded in the event/history:
           * "guild_agent_added" / "guild_agent_removed" on success,
           * "guild_cli_error" if the CLI ran but returned non-zero,
           * "guild_cli_unavailable" if the CLI could not be executed at all.
-        Local tier state advances regardless — the status is the honest record of whether
-        the workspace actually changed.
+        The returned status is the honest record of whether the workspace actually
+        changed.
         """
         action = "add" if transition == PROMOTED else "remove"
         cmd = [
-            "npx", "--yes", "@guildai/cli@latest",
+            "npx", "--yes", config.GUILD_CLI_PACKAGE,
             "workspace", "agent", action, self._l1_agent,
             "--workspace", self._workspace,
         ]
@@ -208,3 +313,7 @@ def _tier_reason(transition: str, verdict: Verdict, side_effect: Optional[str], 
             f"{effect}"
         )
     return f"Demoted on {verdict.value} — write grant revoked{effect}"
+
+
+def _guild_effect_succeeded(side_effect: Optional[str]) -> bool:
+    return side_effect in {"guild_agent_added", "guild_agent_removed"}

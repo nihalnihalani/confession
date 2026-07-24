@@ -49,11 +49,41 @@ python3 -m venv .venv && .venv/bin/pip install -r engine/requirements.txt
 cd ui && npm install && npm run dev       # → http://localhost:5173
 ```
 
-Run one full audit cycle from the CLI:
+Run the autonomous Builder loop or one direct audit:
 
 ```bash
+.venv/bin/python -m confession.cli builder --task T1
 .venv/bin/python -m confession.cli audit --claim "task-1 done" --target-url https://<deployed-target-app>
 ```
+
+The dashboard reads the real `target-app/TASKS.md`, hydrates its ledger from durable
+SQLite state, then follows the live WebSocket stream. Mutation controls require a
+role-scoped access key when `CONFESSION_AUTH_REQUIRED=true`.
+
+## Production deployment
+
+The repository includes a single-worker container that builds the React dashboard,
+serves it from FastAPI on the same origin, keeps Node available for the pinned Guild CLI,
+and stores restart-safe state under `/data`.
+
+```bash
+cp .env.example .env
+# Set CONFESSION_ENV=production, CONFESSION_AUTH_REQUIRED=true,
+# CONFESSION_API_KEYS, a deployed HTTPS TARGET_APP_URL + allowed host,
+# and the real Replay/Pioneer values. Authenticate Guild in the runtime.
+docker build -t confession .
+docker run --env-file .env -p 8000:8000 -v confession-state:/data confession
+curl --fail http://localhost:8000/ready
+```
+
+Run exactly one engine worker with the bundled SQLite state store. Horizontal scaling
+requires a shared database and event broker. `/health` is liveness/configuration detail;
+`/ready` returns `503` until all production dependencies are configured and no Guild
+grant transition is pending. Never put access keys in the Vite bundle: operators paste a
+key into the dashboard, where it is kept only in that browser tab.
+
+CI compiles and tests the engine, builds the dashboard, tests the real target app, and
+enforces the repository's prohibited-identifier rule.
 
 ## Sponsor tools
 

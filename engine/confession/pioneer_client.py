@@ -10,8 +10,8 @@ Endpoint shapes:
   captured in the repo CLAUDE.md sponsor notes. Those paths are marked below and should
   be confirmed against docs.pioneer.ai/openapi.json before the live fine-tune run.
 
-Missing key raises `PioneerNotConfigured` with an actionable message — never a silent
-fallback and never automatic firing.
+Missing key raises `PioneerNotConfigured` with an actionable message. Both chat models
+and fine-tune base models are checked against their live listing endpoints before use.
 """
 
 from __future__ import annotations
@@ -42,6 +42,10 @@ class PioneerInfraError(PioneerError):
 
 class PioneerModelUnavailable(PioneerError):
     """The configured PIONEER_MODEL is not present in `GET /v1/models`."""
+
+
+class PioneerBaseModelUnavailable(PioneerError):
+    """The selected fine-tune base model is not present in `GET /base-models`."""
 
 
 class PioneerClient:
@@ -118,6 +122,19 @@ class PioneerClient:
             )
 
     # -- fine-tune flow (paths per CLAUDE.md sponsor notes; verify on-site) --
+
+    async def list_base_models(self) -> list[str]:
+        """List the fine-tune base-model ids from `GET /base-models`."""
+        result = await self._request("GET", "/base-models")
+        return _model_ids(result)
+
+    async def validate_base_model(self, model: str) -> None:
+        """Reject a fine-tune request before dataset generation when its base is absent."""
+        available = await self.list_base_models()
+        if model not in available:
+            raise PioneerBaseModelUnavailable(
+                f"base_model={model!r} is not in GET /base-models. Available: {available}."
+            )
 
     async def generate_dataset(self, name: str, examples: list[dict[str, Any]]) -> dict[str, Any]:
         """Start a data-generation job that builds a training dataset from examples.
@@ -204,7 +221,7 @@ def _model_ids(result: Any) -> list[str]:
     """Extract model ids from a `GET /v1/models` response (OpenAI-compatible shape)."""
     items: list[Any]
     if isinstance(result, dict):
-        raw = result.get("data") or result.get("models") or []
+        raw = result.get("data") or result.get("models") or result.get("base_models") or []
         items = raw if isinstance(raw, list) else []
     elif isinstance(result, list):
         items = result

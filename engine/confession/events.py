@@ -13,17 +13,24 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from .models import Event, EventType
+
+EventSink = Callable[[Event], Awaitable[None]]
 
 
 class EventBus:
     """Fan-out bus: one publisher, many subscribers, with a bounded history buffer."""
 
-    def __init__(self, buffer_size: int = 500) -> None:
+    def __init__(
+        self,
+        buffer_size: int = 500,
+        sink: Optional[EventSink] = None,
+    ) -> None:
         self._buffer: deque[Event] = deque(maxlen=buffer_size)
         self._subscribers: set[asyncio.Queue[Event]] = set()
+        self._sink = sink
 
     # -- history ------------------------------------------------------------
 
@@ -34,10 +41,17 @@ class EventBus:
     def buffer_size(self) -> int:
         return self._buffer.maxlen or 0
 
+    def restore(self, events: list[Event]) -> None:
+        """Hydrate persisted history without publishing or writing it a second time."""
+        self._buffer.clear()
+        self._buffer.extend(events)
+
     # -- publish ------------------------------------------------------------
 
     async def publish(self, event: Event) -> None:
         """Append to the ring buffer and fan out to every current subscriber."""
+        if self._sink is not None:
+            await self._sink(event)
         self._buffer.append(event)
         for queue in list(self._subscribers):
             # Queues are unbounded, so this never blocks or drops.

@@ -34,7 +34,7 @@ Catch rate = (false `done` claims caught by Replay) / (total `done` claims audit
 
 | Metric | Value | Measured at | Command |
 |---|---|---|---|
-| Promotions L0→L1 observed | _(fill)_ | _(fill)_ | `npx --yes @guildai/cli@latest session list --workspace confession/confession --json` |
+| Promotions L0→L1 observed | _(fill)_ | _(fill)_ | `npx --yes @guildai/cli@0.12.3 session list --workspace confession/confession --json` |
 | Demotions L1→L0 observed | _(fill)_ | _(fill)_ | same session dump |
 
 ## Pioneer fine-tune

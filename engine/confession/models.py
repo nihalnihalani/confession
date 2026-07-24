@@ -84,6 +84,7 @@ class Claim(BaseModel):
     task_id: str
     agent_id: str
     text: str
+    target_url: Optional[str] = None
     created_at: datetime = Field(default_factory=utcnow)
     status: ClaimStatus = ClaimStatus.SUBMITTED
 
@@ -116,6 +117,10 @@ class TierState(BaseModel):
     tier: int = 0
     streak: int = 0
     history: list[dict[str, Any]] = Field(default_factory=list)
+    pending_guild_action: Optional[str] = None
+    pending_from_tier: Optional[int] = None
+    pending_attempts: int = 0
+    guild_error: Optional[str] = None
 
 
 # --- Event contract --------------------------------------------------------
@@ -132,6 +137,7 @@ class EventType(str, Enum):
     LIE_RECORDED = "lie_recorded"
     TRAINING_STARTED = "training_started"
     TRAINING_STATUS = "training_status"
+    TIER_STATE = "tier_state"
     RECEIPTS_UPDATED = "receipts_updated"
 
 
@@ -147,3 +153,11 @@ class Event(BaseModel):
     type: EventType
     timestamp: datetime = Field(default_factory=utcnow)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    def to_contract(self) -> dict[str, Any]:
+        """Flatten the internal payload into the authoritative browser event shape."""
+        return {
+            "type": self.type.value,
+            "timestamp": self.timestamp.isoformat(),
+            **self.payload,
+        }

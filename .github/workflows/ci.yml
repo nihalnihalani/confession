@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            engine/requirements.txt
+            engine/requirements-dev.txt
+
+      - name: Install engine dependencies
+        run: python -m pip install -r engine/requirements-dev.txt
+
+      - name: Verify engine
+        run: |
+          python -m compileall -q engine/confession
+          pytest -q engine/tests
+          pip-audit -r engine/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            ui/package-lock.json
+            target-app/package-lock.json
+
+      - name: Verify dashboard
+        run: |
+          npm ci --prefix ui
+          npm run build --prefix ui
+          npm audit --prefix ui
+
+      - name: Verify target application
+        run: |
+          npm ci --prefix target-app
+          npm test --prefix target-app
+          npm audit --prefix target-app
+
+      - name: Enforce the realness identifier rule
+        run: |
+          if git grep -nEI '\b(mock|stub|fake|seed_demo|synthetic|fallback_payload)\b' -- engine/confession ui/src target-app guild-agents; then
+            exit 1
+          fi

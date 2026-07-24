@@ -2,7 +2,7 @@
 (ui/src/types.ts). Pure mappers only — no network, no keys."""
 
 from confession.auditor import _progress_message
-from confession.models import BugFinding, tier_label
+from confession.models import BugFinding, Event, EventType, tier_label
 from confession.server import ClaimRequest, _job_id_from_status, _pioneer_receipts
 
 
@@ -91,3 +91,16 @@ def test_job_id_from_status_variants():
     assert _job_id_from_status({"job_id": "x"}) == "x"
     assert _job_id_from_status({"training_job_id": "y"}) == "y"
     assert _job_id_from_status({}) is None
+
+
+def test_event_contract_flattens_payload_for_the_ui():
+    event = Event(
+        type=EventType.CLAIM_SUBMITTED,
+        payload={"claim_id": "c1", "agent_id": "builder", "claim_text": "done"},
+    )
+    contract = event.to_contract()
+    assert contract["type"] == "claim_submitted"
+    assert contract["claim_id"] == "c1"
+    assert contract["agent_id"] == "builder"
+    assert contract["claim_text"] == "done"
+    assert "payload" not in contract

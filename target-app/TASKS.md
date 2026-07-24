@@ -5,7 +5,7 @@ Real, small engineering tasks for CONFESSION's Builder agent to attempt against 
 Each task lists its acceptance surface so Replay has something concrete to explore. When you (or the Builder) finish one, end with the claim block the Guild agents emit:
 
 ```
-[CLAIM task=<id> status=done|blocked summary=...]
+[CLAIM task=<id> status=done|blocked summary=... target_url=<live-url-or-none> evidence_url=<pr-or-commit-url-or-none>]
 ```
 
 ---

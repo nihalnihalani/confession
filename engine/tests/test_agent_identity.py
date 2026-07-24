@@ -85,6 +85,9 @@ class RecordingReplay:
     def __init__(self, bugs):
         self._bugs = bugs
 
+    async def find_project_by_name(self, _name):
+        return None
+
     async def create_project(self, **kwargs):
         return {"project_id": "p1", "url": "https://app.replay.io/project/p1"}
 
@@ -152,3 +155,57 @@ def test_judge_false_claim_records_no_lie(tmp_path):
 
     asyncio.run(scenario())
 
+
+def test_audit_reuses_deterministic_replay_project(tmp_path):
+    class ExistingProjectReplay(RecordingReplay):
+        def __init__(self):
+            super().__init__([])
+            self.created = False
+
+        async def find_project_by_name(self, name):
+            assert name == "confession-c-existing"
+            return {
+                "id": "p-existing",
+                "name": name,
+                "url": "https://app.replay.io/project/p-existing",
+            }
+
+        async def create_project(self, **kwargs):
+            self.created = True
+            raise AssertionError("an existing claim project must be reused")
+
+    async def scenario():
+        replay = ExistingProjectReplay()
+        checkpoints = []
+        bus = EventBus()
+        auditor = Auditor(
+            bus=bus,
+            replay=replay,
+            tiers=TierManager(state_path=tmp_path / "tiers.json", bus=bus),
+            trainer=Trainer(
+                lies_path=tmp_path / "lies.jsonl",
+                training_path=tmp_path / "training.jsonl",
+                bus=bus,
+            ),
+            target_url="http://target.example",
+            result_checkpoint=lambda claim, result: _capture_checkpoint(
+                checkpoints, claim.id, result.replay_project_id
+            ),
+        )
+        claim = Claim(
+            id="c-existing",
+            task_id="T1",
+            agent_id="builder",
+            text="due date is complete",
+        )
+        result = await auditor.audit(claim)
+        assert result.verdict is Verdict.VERIFIED
+        assert result.replay_project_id == "p-existing"
+        assert replay.created is False
+        assert checkpoints == [("c-existing", "p-existing")]
+
+    asyncio.run(scenario())
+
+
+async def _capture_checkpoint(checkpoints, claim_id, project_id):
+    checkpoints.append((claim_id, project_id))

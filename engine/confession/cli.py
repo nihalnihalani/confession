@@ -149,6 +149,13 @@ def _cmd_builder(args: argparse.Namespace) -> int:
             print(f"  agent reported blocked: {outcome.get('summary')}")
         elif status == "no_claim":
             print("  agent produced no valid [CLAIM ...] block; nothing audited")
+        elif status == "rejected_claim":
+            print(
+                "  claim rejected: assigned task "
+                f"{outcome.get('task_id')} but agent claimed {outcome.get('claimed_task_id')}"
+            )
+        elif status == "not_deployed":
+            print(f"  claim not audited: {outcome.get('reason')}")
     return 0
 
 

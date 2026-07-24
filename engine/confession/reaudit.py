@@ -15,7 +15,7 @@ it delegates to the same auditor every other claim uses).
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from .models import AuditResult, Claim, Verdict
 
@@ -23,6 +23,8 @@ from .models import AuditResult, Claim, Verdict
 PendingProvider = Callable[[], list[tuple[Claim, AuditResult]]]
 AuditFn = Callable[[Claim], Awaitable[AuditResult]]
 StoreFn = Callable[[Claim, AuditResult], Awaitable[None]]
+AttemptProvider = Callable[[str], int]
+AttemptSpender = Callable[[str, int], Optional[int]]
 
 
 def is_reaudit_eligible(verdict: Verdict, attempts: int, max_attempts: int) -> bool:
@@ -41,6 +43,8 @@ class ReauditScheduler:
         store: StoreFn,
         max_attempts: int,
         interval_s: float,
+        attempt_provider: Optional[AttemptProvider] = None,
+        attempt_spender: Optional[AttemptSpender] = None,
     ) -> None:
         self._pending = pending
         self._audit = audit
@@ -48,8 +52,12 @@ class ReauditScheduler:
         self._max_attempts = max_attempts
         self._interval_s = interval_s
         self._attempts: dict[str, int] = {}
+        self._attempt_provider = attempt_provider
+        self._attempt_spender = attempt_spender
 
     def attempts_for(self, claim_id: str) -> int:
+        if self._attempt_provider is not None:
+            return self._attempt_provider(claim_id)
         return self._attempts.get(claim_id, 0)
 
     async def run_once(self) -> int:
@@ -61,10 +69,14 @@ class ReauditScheduler:
         """
         reaudited = 0
         for claim, result in self._pending():
-            attempts = self._attempts.get(claim.id, 0)
+            attempts = self.attempts_for(claim.id)
             if not is_reaudit_eligible(result.verdict, attempts, self._max_attempts):
                 continue
-            self._attempts[claim.id] = attempts + 1
+            if self._attempt_spender is not None:
+                if self._attempt_spender(claim.id, self._max_attempts) is None:
+                    continue
+            else:
+                self._attempts[claim.id] = attempts + 1
             try:
                 new_result = await self._audit(claim)
                 await self._store(claim, new_result)

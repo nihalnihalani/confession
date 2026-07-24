@@ -26,6 +26,7 @@ import subprocess
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
@@ -66,6 +67,8 @@ class ParsedClaim(BaseModel):
     task_id: str
     status: Literal["done", "blocked"]
     summary: str = ""
+    target_url: Optional[str] = None
+    evidence_url: Optional[str] = None
 
 
 # Tolerant matcher for a claim block anywhere in the agent's prose. `body` is captured up
@@ -74,6 +77,11 @@ _CLAIM_BLOCK_RE = re.compile(r"\[\s*CLAIM\b(?P<body>[^\]]*)\]", re.IGNORECASE | 
 _TASK_RE = re.compile(r"task\s*=\s*(?P<task>[^\s\]]+)", re.IGNORECASE)
 _STATUS_RE = re.compile(r"status\s*=\s*(?P<status>done|blocked)", re.IGNORECASE)
 _SUMMARY_RE = re.compile(r"summary\s*=\s*(?P<summary>.*)", re.IGNORECASE | re.DOTALL)
+_TARGET_RE = re.compile(r"target_url\s*=\s*(?P<url>https?://[^\s\]]+)", re.IGNORECASE)
+_EVIDENCE_RE = re.compile(
+    r"(?:evidence_url|pr)\s*=\s*(?P<url>https?://[^\s\]]+)",
+    re.IGNORECASE,
+)
 
 
 def parse_claim_block(text: str) -> Optional[ParsedClaim]:
@@ -98,11 +106,20 @@ def parse_claim_block(text: str) -> Optional[ParsedClaim]:
     summary_match = _SUMMARY_RE.search(body)
     if summary_match:
         # Trim trailing separators/quotes the summary may pick up.
-        summary = summary_match.group("summary").strip().strip('"').strip()
+        summary = re.split(
+            r"\s+(?:target_url|evidence_url|pr)\s*=",
+            summary_match.group("summary"),
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip().strip('"').strip()
+    target_match = _TARGET_RE.search(body)
+    evidence_match = _EVIDENCE_RE.search(body)
     return ParsedClaim(
         task_id=task_match.group("task"),
         status=status_match.group("status").lower(),  # type: ignore[arg-type]
         summary=summary,
+        target_url=target_match.group("url") if target_match else None,
+        evidence_url=evidence_match.group("url") if evidence_match else None,
     )
 
 
@@ -269,31 +286,48 @@ class BuilderRunner:
         requirements = (
             f"\n\nTask requirements from TASKS.md:\n{task.details}" if task.details else ""
         )
+        deployment = (
+            "\n\nA done claim must name the live deployed acceptance surface as "
+            "target_url=https://... . If the change is not deployed, report blocked."
+            if config.builder_requires_deployed_target()
+            else ""
+        )
         return (
             "You are the CONFESSION Builder agent. Complete this task in the target "
             "application, making the change directly:\n"
             f"[{task.id}] {task.title}"
-            f"{requirements}\n\n"
+            f"{requirements}"
+            f"{deployment}\n\n"
             "When you are finished, end your reply with EXACTLY one line:\n"
-            f"[CLAIM task={task.id} status=done summary=<one sentence on what you changed>]\n"
+            f"[CLAIM task={task.id} status=done summary=<one sentence> "
+            "target_url=<live URL> evidence_url=<PR or commit URL>]\n"
             "If you could not complete it, use status=blocked and explain in the summary."
         )
 
     async def invoke_agent(self, task: BuilderTask) -> str:
         """Run the real Guild builder agent once and return its stdout.
 
-        Uses `npx --yes @guildai/cli@latest chat --once "<prompt>" --agent <agent>`. Raises
+        Uses the pinned Guild CLI package from `GUILD_CLI_PACKAGE`. Raises
         `BuilderNotConfigured` when the CLI is missing or exits non-zero with no output
         (the unauthenticated/misconfigured case) — never fabricates a response.
         """
         agent = self._guild_agent_for_tier()
         prompt = self._build_prompt(task)
-        cmd = ["npx", "--yes", "@guildai/cli@latest", "chat", "--once", prompt, "--agent", agent]
+        cmd = [
+            "npx",
+            "--yes",
+            config.GUILD_CLI_PACKAGE,
+            "chat",
+            "--once",
+            prompt,
+            "--agent",
+            agent,
+        ]
 
         if shutil.which("npx") is None:
             raise BuilderNotConfigured(
                 "npx is not on PATH — install Node.js and the Guild CLI, then "
-                "`npx @guildai/cli@latest auth login` before running the Builder."
+                f"`npx {config.GUILD_CLI_PACKAGE} auth login` before running the Builder."
             )
 
         def _run() -> tuple[int, str, str]:
@@ -307,9 +341,9 @@ class BuilderRunner:
         except subprocess.SubprocessError as exc:
             raise BuilderNotConfigured(f"Guild CLI invocation failed: {exc}") from exc
 
-        if returncode != 0 and not stdout.strip():
+        if returncode != 0:
             raise BuilderNotConfigured(
-                f"Guild CLI exited {returncode} with no output (likely unauthenticated). "
+                f"Guild CLI exited {returncode}; the run cannot be trusted as complete. "
                 f"stderr: {stderr.strip()[:400]}"
             )
         return stdout
@@ -324,11 +358,25 @@ class BuilderRunner:
                        (includes claim_id, verdict, report_url).
         * "blocked"  — the agent honestly reported it could not finish; no audit.
         * "no_claim" — the agent produced no valid claim block; recorded, no audit.
+        * "not_deployed" — a done claim named no live acceptance surface; no audit.
+        * "rejected_claim" — the claim named the wrong task or a disallowed target.
         Raises `BuilderNotConfigured` if the real agent could not be run at all.
         """
         task = pick_task(self.load_tasks(), task_id)
         agent = self._guild_agent_for_tier()
-        output = await self.invoke_agent(task)
+        try:
+            output = await self.invoke_agent(task)
+        except BuilderNotConfigured as exc:
+            self._log(
+                {
+                    "at": utcnow().isoformat(),
+                    "status": "not_configured",
+                    "task_id": task.id,
+                    "guild_agent": agent,
+                    "error": str(exc),
+                }
+            )
+            raise
         parsed = parse_claim_block(output)
 
         base = {"task_id": task.id, "guild_agent": agent}
@@ -338,8 +386,38 @@ class BuilderRunner:
             self._log({**outcome, "at": utcnow().isoformat(), "raw_output": output[:2000]})
             return outcome
 
+        if parsed.task_id.casefold() != task.id.casefold():
+            outcome = {
+                **base,
+                "status": "rejected_claim",
+                "claimed_task_id": parsed.task_id,
+                "reason": "The claim task id did not match the assigned task.",
+            }
+            self._log({**outcome, "at": utcnow().isoformat()})
+            return outcome
+
         if parsed.status == "blocked":
             outcome = {**base, "task_id": parsed.task_id, "status": "blocked", "summary": parsed.summary}
+            self._log({**outcome, "at": utcnow().isoformat()})
+            return outcome
+
+        if config.builder_requires_deployed_target() and not parsed.target_url:
+            outcome = {
+                **base,
+                "status": "not_deployed",
+                "summary": parsed.summary,
+                "reason": "A live target_url is required before a done claim can be audited.",
+            }
+            self._log({**outcome, "at": utcnow().isoformat()})
+            return outcome
+
+        if parsed.target_url and not _target_url_allowed(parsed.target_url):
+            outcome = {
+                **base,
+                "status": "rejected_claim",
+                "claimed_task_id": parsed.task_id,
+                "reason": "The claimed target_url host is not allowed.",
+            }
             self._log({**outcome, "at": utcnow().isoformat()})
             return outcome
 
@@ -349,6 +427,7 @@ class BuilderRunner:
             agent_id=self._builder_agent_id,
             task_id=parsed.task_id,
             text=parsed.summary or task.title,
+            target_url=parsed.target_url,
         )
         if self._bus is not None:
             await self._bus.emit(
@@ -366,6 +445,8 @@ class BuilderRunner:
                 "guild_agent": agent,
                 "claim_id": claim.id,
                 "summary": parsed.summary,
+                "target_url": parsed.target_url,
+                "evidence_url": parsed.evidence_url,
             }
         )
         result = await self._auditor.audit(claim)
@@ -385,3 +466,14 @@ class BuilderRunner:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         with self._log_path.open("a") as handle:
             handle.write(json.dumps(record) + "\n")
+
+
+def _target_url_allowed(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme in (
+            {"https"} if config.ENVIRONMENT == "production" else {"http", "https"}
+        )
+        and bool(parsed.hostname)
+        and parsed.hostname.lower() in config.target_app_allowed_hosts()
+    )

@@ -84,6 +84,12 @@ function AgentTier({ agent }: { agent: TierState }): JSX.Element {
       {agent.lastReason ? (
         <p className="atier__reason mono">{agent.lastReason}</p>
       ) : null}
+      {agent.pendingAction ? (
+        <p className="atier__pending mono" role="status">
+          Guild {agent.pendingAction} pending
+          {agent.error ? ` · ${agent.error}` : ""}
+        </p>
+      ) : null}
     </li>
   );
 }

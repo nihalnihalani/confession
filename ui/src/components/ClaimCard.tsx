@@ -28,14 +28,17 @@ export function ClaimCard({ claim }: { claim: Claim }): JSX.Element {
             <span className="claim__task">
               {claim.task_title ?? claim.task_id ?? "task"}
             </span>
+            <time className="claim__time mono" dateTime={claim.submitted_at}>
+              {formatTime(claim.submitted_at)}
+            </time>
           </div>
         </div>
         <StatusChip claim={claim} />
       </header>
 
       <p className="claim__text">
-        <span className="claim__check" aria-hidden="true">
-          ✅
+        <span className="claim__oath mono" aria-hidden="true">
+          CLAIM
         </span>
         <span className="mono">{claim.claim_text || "Done."}</span>
       </p>
@@ -48,6 +51,25 @@ export function ClaimCard({ claim }: { claim: Claim }): JSX.Element {
           <span className="claim__scanlabel mono">
             {claim.progress_message ?? "Verifying via Replay QA…"}
           </span>
+        </div>
+      ) : null}
+
+      {!claim.auditing && status === "PENDING" && claim.progress_message ? (
+        <p className="claim__pending-note mono">{claim.progress_message}</p>
+      ) : null}
+
+      {claim.target_url || claim.project_url ? (
+        <div className="claim__links mono">
+          {claim.target_url ? (
+            <a href={claim.target_url} target="_blank" rel="noreferrer">
+              deployed target ↗
+            </a>
+          ) : null}
+          {claim.project_url ? (
+            <a href={claim.project_url} target="_blank" rel="noreferrer">
+              Replay project ↗
+            </a>
+          ) : null}
         </div>
       ) : null}
 
@@ -82,4 +104,15 @@ function initials(agentId: string): string {
   if (parts.length === 0) return "?";
   if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
   return (parts[0]![0]! + parts[1]![0]!).toUpperCase();
+}
+
+function formatTime(timestamp: string): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }

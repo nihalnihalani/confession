@@ -1,6 +1,7 @@
 """Unit tests for the Builder loop's pure logic — claim-block parsing and task parsing.
 No network, no subprocess: only the pure parsers and task selection."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from confession import config
 from confession.builder import (
     BuilderError,
+    BuilderNotConfigured,
     BuilderRunner,
     BuilderTask,
     parse_claim_block,
@@ -26,6 +28,17 @@ def test_parse_valid_done_claim():
     assert claim.task_id == "T3"
     assert claim.status == "done"
     assert claim.summary == "Added due dates to todos"
+
+
+def test_parse_done_claim_with_deployment_receipts():
+    claim = parse_claim_block(
+        "[CLAIM task=T3 status=done summary=Shipped the fix "
+        "target_url=https://tasklight.example evidence_url=https://github.com/acme/app/pull/7]"
+    )
+    assert claim is not None
+    assert claim.summary == "Shipped the fix"
+    assert claim.target_url == "https://tasklight.example"
+    assert claim.evidence_url == "https://github.com/acme/app/pull/7"
 
 
 def test_parse_blocked_claim():
@@ -210,3 +223,87 @@ def test_guild_builder_agent_l0_and_l1_derivation():
     # L1 swaps the l0 marker for l1 so a promoted builder runs with the write grant
     assert l1.endswith("l1")
     assert l1 == l0.replace("l0", "l1")
+
+
+def test_runner_rejects_claim_for_a_different_task(tmp_path):
+    class TierView:
+        tier = 0
+
+    class Tiers:
+        def get(self, _agent_id):
+            return TierView()
+
+    class Auditor:
+        async def audit(self, _claim):
+            raise AssertionError("mismatched claim must never reach the auditor")
+
+    class Runner(BuilderRunner):
+        async def invoke_agent(self, _task):
+            return "[CLAIM task=T2 status=done summary=unrelated work]"
+
+    tasks_file = tmp_path / "TASKS.md"
+    tasks_file.write_text("- [ ] T1: assigned work")
+    runner = Runner(
+        auditor=Auditor(),
+        tiers=Tiers(),
+        tasks_file=tasks_file,
+        log_path=tmp_path / "builder.jsonl",
+    )
+    outcome = asyncio.run(runner.run("T1"))
+    assert outcome["status"] == "rejected_claim"
+    assert outcome["claimed_task_id"] == "T2"
+
+
+def test_runner_records_configuration_failure(tmp_path):
+    class TierView:
+        tier = 0
+
+    class Tiers:
+        def get(self, _agent_id):
+            return TierView()
+
+    class Runner(BuilderRunner):
+        async def invoke_agent(self, _task):
+            raise BuilderNotConfigured("Guild login missing")
+
+    tasks_file = tmp_path / "TASKS.md"
+    tasks_file.write_text("- [ ] T1: assigned work")
+    log_path = tmp_path / "builder.jsonl"
+    runner = Runner(
+        auditor=object(),
+        tiers=Tiers(),
+        tasks_file=tasks_file,
+        log_path=log_path,
+    )
+    with pytest.raises(BuilderNotConfigured):
+        asyncio.run(runner.run("T1"))
+    assert '"status": "not_configured"' in log_path.read_text()
+
+
+def test_runner_does_not_audit_done_claim_without_deployment(monkeypatch, tmp_path):
+    class TierView:
+        tier = 1
+
+    class Tiers:
+        def get(self, _agent_id):
+            return TierView()
+
+    class Auditor:
+        async def audit(self, _claim):
+            raise AssertionError("an undeployed claim must never reach Replay")
+
+    class Runner(BuilderRunner):
+        async def invoke_agent(self, _task):
+            return "[CLAIM task=T1 status=done summary=PR opened]"
+
+    monkeypatch.setenv("BUILDER_REQUIRE_DEPLOYED_TARGET", "true")
+    tasks_file = tmp_path / "TASKS.md"
+    tasks_file.write_text("- [ ] T1: assigned work")
+    runner = Runner(
+        auditor=Auditor(),
+        tiers=Tiers(),
+        tasks_file=tasks_file,
+        log_path=tmp_path / "builder.jsonl",
+    )
+    outcome = asyncio.run(runner.run("T1"))
+    assert outcome["status"] == "not_deployed"

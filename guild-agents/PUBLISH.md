@@ -5,7 +5,7 @@ Exact CLI sequence to create the workspace and init → save → publish → wor
 Set an alias for the session so every command is unambiguous:
 
 ```bash
-alias guild='npx --yes @guildai/cli@latest'
+alias guild='npx --yes @guildai/cli@0.12.3'
 guild auth login          # opens the browser; authenticates the CLI
 guild auth whoami         # confirm the signed-in owner; note it as $OWNER below
 ```

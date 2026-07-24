@@ -24,7 +24,9 @@ The boundary is still the grant, not the prompt: an L1 agent that is demoted kee
 ## Claim contract
 
 ```
-[CLAIM task=<id> status=done|blocked summary=<one sentence> pr=<url-or-none>]
+[CLAIM task=<id> status=done|blocked summary=<one sentence> target_url=<live-url-or-none> evidence_url=<pr-or-commit-url-or-none>]
 ```
 
-Claiming `done` without a PR that actually implements the task is the exact failure mode Replay QA is built to catch — and does.
+The engine accepts `done` only with a live deployed acceptance surface; a PR without a
+deployment URL remains `blocked`. Claiming completion without a deployed change that
+actually implements the task is the exact failure mode Replay QA is built to catch.

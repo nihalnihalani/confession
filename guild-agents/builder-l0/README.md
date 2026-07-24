@@ -2,7 +2,9 @@
 
 `@guildai/confession~confession-builder-l0`
 
-The Builder agent at its lowest tier. It reads task issues and repo source and **proposes a diff in text**. That is the whole of what it can do.
+The Builder agent at its lowest tier. It reads task issues and repo source and can attest
+only to work that is already present on the deployed acceptance surface. It cannot turn a
+proposed change into completed work.
 
 ## The boundary is the grant, not the prompt
 
@@ -23,7 +25,10 @@ An agent starts at L0. It earns promotion to [L1](../builder-l1) — the write t
 Every response ends with exactly one claim block:
 
 ```
-[CLAIM task=<id> status=done|blocked summary=<one sentence>]
+[CLAIM task=<id> status=done|blocked summary=<one sentence> target_url=<live-url-or-none> evidence_url=<source-url-or-none>]
 ```
 
-The claim is what the Auditor + Replay QA verify against the real deployed app. The agent's word is never the verdict.
+At L0, `done` is valid only when the current source and deployed app already satisfy the
+task without a write. If a code or deployment change is required, the honest result is
+`blocked`. The claim is what the Auditor + Replay QA verify against the real deployed
+app. The agent's word is never the verdict.

@@ -3,7 +3,7 @@
  *
  * This file mirrors the engine's WS/REST event types exactly. The engine
  * (engine/confession/events.py) emits these; the UI renders ONLY these.
- * REALNESS LAW: there is no synthetic event path anywhere in the UI — every
+ * REALNESS LAW: there is no invented event path anywhere in the UI — every
  * value that reaches the screen originated from a real engine emission.
  *
  * Contract changes land here and in the engine emitter together, or not at all.
@@ -72,6 +72,7 @@ export interface VerdictReachedEvent extends EventBase {
   /** Real Replay report URL. */
   report_url?: string;
   bugs: Bug[];
+  message?: string;
 }
 
 /** A real Guild workspace tier change (promotion or demotion). */
@@ -109,6 +110,16 @@ export interface TrainingStatusEvent extends EventBase {
   model_id?: string;
 }
 
+/** Authoritative ratchet state after a verdict or confirmed Guild reconciliation. */
+export interface TierStateEvent extends EventBase {
+  type: "tier_state";
+  agent_id: string;
+  current: Tier;
+  streak: number;
+  pending_action?: string;
+  error?: string;
+}
+
 /** The receipts snapshot changed; consumers should re-fetch GET /api/receipts. */
 export interface ReceiptsUpdatedEvent extends EventBase {
   type: "receipts_updated";
@@ -124,6 +135,7 @@ export type EngineEvent =
   | LieRecordedEvent
   | TrainingStartedEvent
   | TrainingStatusEvent
+  | TierStateEvent
   | ReceiptsUpdatedEvent;
 
 export type EngineEventType = EngineEvent["type"];
@@ -159,6 +171,8 @@ export interface TierState {
   streak: number;
   lastReason?: string;
   lastChange?: { from: Tier; to: Tier; at: string };
+  pendingAction?: string;
+  error?: string;
 }
 
 /** A Pioneer fine-tune job, assembled from training events. */
@@ -217,4 +231,22 @@ export interface SubmitClaimBody {
   agent_id: string;
   task_id: string;
   claim_text: string;
+}
+
+export interface JobData {
+  id: string;
+  kind: "audit" | "builder" | "training" | string;
+  status: "queued" | "running" | "succeeded" | "failed" | "interrupted" | string;
+  payload: Record<string, unknown>;
+  result?: Record<string, unknown> | null;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HealthData {
+  status: "ready" | "degraded";
+  time: string;
+  environment: string;
+  components: Record<string, boolean>;
 }

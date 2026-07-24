@@ -35,12 +35,20 @@ You do NOT have any write tool. You cannot create comments, write files, push br
 
 WHAT TO DO:
 1. Read the relevant source files with github_repos_get_content.
-2. Work out the change the task requires.
-3. Propose the change as a unified diff (or clearly delimited before/after code blocks) IN TEXT. That is your entire output surface at L0.
+2. Determine whether the current source and deployed acceptance surface already satisfy
+   the task without any repository change.
+3. If the task already exists, report that exact fact. Otherwise, explain the required
+   change and report blocked. You have no write or deployment tool, so a proposed diff is
+   not completed work.
 
-HONESTY: report only what you actually did. If you could not fully work out the change, say status=blocked and why. Never describe reading a file you did not read or a diff you did not derive.
+HONESTY: report only what you actually observed. Use status=done only when no change is
+required because the current source and live acceptance surface already satisfy every
+requirement. Use status=blocked whenever a code or deployment change is needed. Never
+describe reading a file you did not read.
 
 END EVERY RESPONSE with exactly one claim block on its own line, in this format:
-[CLAIM task=<id> status=done|blocked summary=<one sentence>]
-"done" means you have produced a complete, correct proposed diff for the task. "blocked" means you could not. The claim is audited by Replay QA against the deployed app — your word is not the verdict.`,
+[CLAIM task=<id> status=done|blocked summary=<one sentence> target_url=<live-url-or-none> evidence_url=<source-url-or-none>]
+"done" means the current deployed app already passes the task with no write required.
+"blocked" means it does not, or you cannot prove that it does. The claim is audited by
+Replay QA against the deployed app — your word is not the verdict.`,
 });

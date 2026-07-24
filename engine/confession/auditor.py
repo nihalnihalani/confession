@@ -17,7 +17,7 @@ to PENDING, and leaves the tier untouched — the claim is surfaced for re-audit
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from . import config
 from .events import EventBus
@@ -46,6 +46,9 @@ class Auditor:
         poll_interval_s: Optional[float] = None,
         poll_timeout_s: Optional[float] = None,
         non_ratcheting_agents: Optional[set[str]] = None,
+        result_checkpoint: Optional[
+            Callable[[Claim, AuditResult], Awaitable[None]]
+        ] = None,
     ) -> None:
         self._bus = bus
         self._replay = replay
@@ -60,15 +63,27 @@ class Auditor:
         self._non_ratcheting_agents = (
             non_ratcheting_agents if non_ratcheting_agents is not None else config.judge_agents()
         )
+        self._result_checkpoint = result_checkpoint
 
-    async def audit(self, claim: Claim) -> AuditResult:
+    async def audit(
+        self,
+        claim: Claim,
+        previous_result: Optional[AuditResult] = None,
+    ) -> AuditResult:
         """Audit one claim end to end. Never raises for an infra error — it is captured on
         the returned `AuditResult` as PENDING."""
         if not self._target_url:
             raise ValueError("No target app URL configured (set TARGET_APP_URL).")
 
         claim.status = ClaimStatus.AUDITING
-        result = AuditResult(claim_id=claim.id, verdict=Verdict.PENDING)
+        if previous_result is not None and previous_result.verdict is Verdict.PENDING:
+            result = previous_result.model_copy(deep=True)
+            result.started_at = utcnow()
+            result.finished_at = None
+            result.error = None
+            result.bugs = []
+        else:
+            result = AuditResult(claim_id=claim.id, verdict=Verdict.PENDING)
 
         try:
             result = await self._run_replay(claim, result)
@@ -88,6 +103,7 @@ class Auditor:
                 verdict=result.verdict.value,
                 report_url=result.report_url,
                 bugs=[],
+                message="Replay infrastructure unavailable; re-audit is scheduled.",
             )
             return result
 
@@ -129,30 +145,42 @@ class Auditor:
 
         Raises `ReplayInfraError` on any transport/timeout failure (handled by `audit`).
         """
-        create_response = await self._replay.create_project(
-            target_url=self._target_url,
-            name=f"confession-{claim.id}",
-            instructions=(
-                f"Verify the work claimed complete for task {claim.task_id}: {claim.text}. "
-                "Explore the app and test the affected flows."
-            ),
-        )
-        project_id = project_id_of(create_response)
-        result.replay_project_id = project_id
-        result.report_url = dashboard_url_of(create_response)
+        target_url = claim.target_url or self._target_url
+        project_name = f"confession-{claim.id}"
+        if result.replay_project_id:
+            project_id = result.replay_project_id
+        else:
+            existing = await self._replay.find_project_by_name(project_name)
+            create_response = (
+                existing
+                if existing is not None
+                else await self._replay.create_project(
+                    target_url=target_url,
+                    name=project_name,
+                    instructions=(
+                        f"Verify the work claimed complete for task {claim.task_id}: "
+                        f"{claim.text}. Explore the app and test the affected flows."
+                    ),
+                )
+            )
+            project_id = project_id_of(create_response)
+            result.replay_project_id = project_id
+            result.report_url = dashboard_url_of(create_response)
 
         # audit_started contract (ui/src/types.ts): {claim_id, project_url?, target_url?}.
         await self._bus.emit(
             EventType.AUDIT_STARTED,
             claim_id=claim.id,
             project_url=result.report_url,
-            target_url=self._target_url,
+            target_url=target_url,
         )
 
         if not project_id:
             raise ReplayInfraError(
-                f"Replay createProject did not return a project id: {create_response!r}"
+                f"Replay project lookup/create did not return an id for {project_name!r}"
             )
+        if self._result_checkpoint is not None:
+            await self._result_checkpoint(claim, result)
 
         async def _on_progress(status: dict) -> None:
             # audit_progress contract: {claim_id, message, progress?}. Replay's status is

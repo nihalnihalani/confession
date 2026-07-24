@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch } from "../api";
 import type { ReceiptsData } from "../types";
 
 /**
@@ -15,7 +16,7 @@ export function Receipts({ version }: { version: number }): JSX.Element {
 
   const load = useCallback(async (): Promise<void> => {
     try {
-      const res = await fetch("/api/receipts", { headers: { Accept: "application/json" } });
+      const res = await apiFetch("/api/receipts");
       if (!res.ok) throw new Error(`receipts ${res.status}`);
       const body = (await res.json()) as Partial<ReceiptsData>;
       if (!mounted.current) return;

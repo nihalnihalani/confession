@@ -103,6 +103,22 @@ class ReplayClient:
 
     # -- projects -----------------------------------------------------------
 
+    async def list_projects(self, status: str = "all") -> list[dict[str, Any]]:
+        """Spec: `GET /api/v1/projects` (operationId listProjects)."""
+        result = await self._request(
+            "GET",
+            "/projects",
+            params={"status": status, "page": 1, "page_size": 100},
+        )
+        return [item for item in _as_item_list(result) if isinstance(item, dict)]
+
+    async def find_project_by_name(self, name: str) -> Optional[dict[str, Any]]:
+        """Find a deterministic audit project so retries reuse it instead of orphaning it."""
+        for project in await self.list_projects(status="all"):
+            if str(project.get("name", "")) == name:
+                return project
+        return None
+
     async def create_project(
         self,
         target_url: str,
