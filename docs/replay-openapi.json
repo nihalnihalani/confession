@@ -1,0 +1,794 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Replay QA API",
+    "version": "1.0.0",
+    "description": "AI-powered QA testing platform. Create projects, manage bugs, run explorations, and inspect test results.\n\n## Continuous QA workflow\n\nThe intended loop for a coding agent keeping an app bug-free:\n\n1. **Create a project** (`POST /projects`) for the running app — pass its `target_url` and a short `instructions` note on the key flows to focus on. Optionally include a `design_document` describing the features it should have.\n2. **Let QA run.** Poll `GET /projects/{project_id}/status` until explorations and test runs finish. QA drives exploration and testing itself — do NOT start your own explorations or test runs.\n3. **Read the bugs.** List open bugs (`GET /projects/{project_id}/bugs?status=open`) and fetch each one (`GET /bugs/{bug_id}`). Every bug ships with a full investigation: reproduction steps, expected vs. actual behavior, a screenshot chronology, and a root-cause analysis traced through the Replay recording (app.replay.io/recording/<id>) down to the responsible code. You do not need to debug — read the report and apply the fix it points to directly in the codebase.\n4. **Mark each fix** (`PATCH /bugs/{bug_id}` with `{\"status\":\"fixed\"}`) — this automatically retries the affected journey to confirm the fix. Use `wontfix` to dismiss a bug or `invalid` if it is not a real bug.\n5. **Loop.** After marking a bug fixed, go back to polling status and keep going until no open bugs remain.\n\n### Apps only reachable from your machine (reverse proxy)\n\nIf `target_url` is reachable only from your own machine (e.g. http://localhost:3000) and not the public internet, create the project with `use_reverse_proxy: true`. It then starts gated and will not run tests until you connect an outbound-only tunnel. The create response includes `reverse_proxy_setup_url`; run `replayqa proxy --project <project_id>` on a machine that can reach the app. The old copy-paste setup runbook remains available from `GET /projects/{project_id}/reverse-proxy` as an advanced fallback.\n\n## Authentication\n\nAll endpoints require a Bearer token. To get one:\n\n1. Sign in at the Replay QA web app\n2. Go to Settings\n3. Click \"Generate token\" in the API section\n4. Copy the token (starts with `lqa_`) — it is only shown once\n\nThen pass it in every request:\n```\nAuthorization: Bearer lqa_your_token_here\n```"
+  },
+  "servers": [
+    {
+      "url": "https://qa.replay.io"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API token from Settings > API Token (starts with lqa_)"
+      }
+    }
+  },
+  "paths": {
+    "/api/v1/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "summary": "List all projects you have access to",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "active",
+                "paused",
+                "all"
+              ],
+              "default": "all"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of projects"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "summary": "Create a new QA project and start automated exploration",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "target_url"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Project name"
+                  },
+                  "target_url": {
+                    "type": "string",
+                    "description": "URL of the application to test"
+                  },
+                  "webhook_url": {
+                    "type": "string",
+                    "description": "URL to receive bug report notifications. Payload: { body, referrer, callback_url, bug_id, title, severity, description, reproduction_steps, expected_behavior, actual_behavior, replay_recording_id, analysis, polish_category }"
+                  },
+                  "finished_webhook_url": {
+                    "type": "string",
+                    "description": "URL to receive a notification when QA on this project finishes and has nothing left to do (no queued/running tasks or in-progress test runs, explorations, polish passes, or guidance updates). Fires once per idle transition. Payload: { event: \"qa.finished\", referrer, project_id, project_name, project_url, bug_count, open_bug_count, resolved_bug_count, finished_at }"
+                  },
+                  "backend_recording_url": {
+                    "type": "string",
+                    "description": "Endpoint for creating Replay recordings of backend requests. Agents POST { requestId } to trigger, GET ?requestId=<id> to poll."
+                  },
+                  "backend_log_url": {
+                    "type": "string",
+                    "description": "Endpoint for fetching backend/database logs. Agents GET ?start=<ISO>&end=<ISO> to retrieve logs."
+                  },
+                  "logins": {
+                    "type": "array",
+                    "description": "Login credentials for the app under test",
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "email",
+                        "password"
+                      ],
+                      "properties": {
+                        "email": {
+                          "type": "string"
+                        },
+                        "password": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "design_document": {
+                    "type": "string",
+                    "description": "Markdown document describing expected app features. When provided, it is given to the app exploration as additional context for planning test journeys (the exploration still browses and records the app)."
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "description": "Instructions for the initial AI exploration",
+                    "default": "Explore the app and test the main features"
+                  },
+                  "recording_id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                    "description": "Replay recording UUID to analyze for bugs. When provided, the project analyzes this single recording instead of exploring the target URL. target_url is not required when recording_id is set."
+                  },
+                  "use_reverse_proxy": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Set to true when target_url is only reachable from your own machine (e.g. http://localhost:3000) and not from the public internet. The project starts gated — it will not run tests until you connect a reverse-proxy tunnel. After creating the project, run `replayqa proxy --project <project_id>` on a machine that can reach target_url. The old setup instructions remain available from GET /api/v1/projects/{project_id}/reverse-proxy as `instructions`."
+                  },
+                  "enabled_polish_passes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "network-performance",
+                        "react-rendering",
+                        "layout-shift",
+                        "accessibility",
+                        "glitches",
+                        "user-experience",
+                        "ui-details"
+                      ]
+                    },
+                    "default": [
+                      "network-performance",
+                      "layout-shift",
+                      "glitches",
+                      "user-experience",
+                      "accessibility",
+                      "ui-details"
+                    ],
+                    "description": "Which polish passes run against the project's test runs. Replaces the default set entirely, so include every pass you want enabled (e.g. add \"ui-details\" to the defaults rather than sending it alone). Unknown pass names are rejected with a 400."
+                  },
+                  "use_staged_guidance": {
+                    "type": "boolean",
+                    "description": "Resolve the LATEST version of every guidance entry — INCLUDING versions staged behind the gate — for all of this project's QA runs, instead of the effective (published) version. Use to exercise un-published guidance edits. Defaults false."
+                  },
+                  "budget": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Credit budget cap for this project — the maximum number of credits QA may spend on it. QA pauses once this cap is reached (raise it later to resume). Rough guide: ~10 = smoke test, 20–50 = thorough, 50+ = broad coverage. Defaults to 20 when omitted."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created project with exploration_id and url (link to the project dashboard). When use_reverse_proxy is true the response also includes reverse_proxy_setup_url — poll it for the tunnel setup instructions."
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/reverse-proxy": {
+      "get": {
+        "operationId": "getReverseProxySetup",
+        "summary": "Get reverse-proxy tunnel status and the setup instructions to connect it",
+        "description": "For projects created with use_reverse_proxy=true. Returns the tunnel status plus a self-contained,\ncopy-paste runbook (the `instructions` field) that an agent runs on a machine that can reach target_url:\ninstall frpc, build a small allowlist-restricted local forward proxy, write the config, and run — all\noutbound-only, no inbound ports.\n\nThe tunnel is provisioned lazily on the first call, so `instructions` is null for the first minute or two\nwhile it spins up — keep polling until it is non-null. Once frpc connects, `ready` flips to true, the\nproject gate opens, and QA starts automatically (no further action). Restrict the forward proxy to the\napp's host plus any backend/auth/CDN hosts it calls during testing.",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reverse-proxy status. Fields: enabled, state (provisioning|active|error|ended|unconfigured), ready (true once frpc is connected and replayqa proxy reports a healthy local data path), frpc_connected, client_health, reverse_proxy_status (pending|ready), cli_command, instructions (advanced fallback setup runbook, or null while provisioning), tunnel (connection details, or null)."
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}": {
+      "get": {
+        "operationId": "getProject",
+        "summary": "Get detailed information about a project",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project details"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateProject",
+        "summary": "Update a project's configuration",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled_polish_passes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "network-performance",
+                        "react-rendering",
+                        "layout-shift",
+                        "accessibility",
+                        "glitches",
+                        "user-experience",
+                        "ui-details"
+                      ]
+                    },
+                    "description": "Which polish passes run against the project's test runs. Replaces the enabled set entirely, so include every pass you want enabled; pass [] to disable all. Unknown pass names are rejected with a 400."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated project"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/status": {
+      "get": {
+        "operationId": "getProjectStatus",
+        "summary": "Get project summary with counts of explorations, journeys, test runs, and bugs",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project status summary"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/timing": {
+      "get": {
+        "operationId": "getProjectTiming",
+        "summary": "Get a project's key timing milestones as absolute, comparable timestamps",
+        "description": "Returns the project's timing milestones on a single server clock, so a consumer can measure\nhow long QA took to start producing activity and to finish without draining event streams.\n\nFields:\n- `created_at` — when the project was created (ISO 8601 UTC).\n- `started_at` — when work actually began (earliest task start), or null if none has started yet.\n- `first_event_at` — server-side arrival time of the earliest rrweb event across ALL of the\n  project's recordings (explorations + test runs); null if no events yet.\n- `finished_at` — when the project last went idle; null while QA is still running.\n- `time_to_first_event_ms` / `time_to_complete_ms` — deltas measured from `created_at`\n  (null when the corresponding timestamp is null).",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project timing milestones"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/bugs": {
+      "get": {
+        "operationId": "listBugs",
+        "summary": "List bugs found in a project",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "fixed",
+                "wontfix",
+                "invalid"
+              ]
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of bugs"
+          }
+        }
+      }
+    },
+    "/api/v1/bugs/{bug_id}": {
+      "get": {
+        "operationId": "getBug",
+        "summary": "Get detailed bug info with analysis, evidence, and reproduction steps",
+        "description": "Returns the full investigation Replay QA already performed: reproduction steps, expected vs. actual behavior, a screenshot chronology, and a root-cause analysis traced through the Replay recording (app.replay.io/recording/<id>) down to the responsible code. You do not need to debug — apply the fix the analysis points to, then mark the bug fixed.",
+        "parameters": [
+          {
+            "name": "bug_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bug details"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateBugStatus",
+        "summary": "Update a bug's status — e.g. mark it fixed after applying a fix in your codebase",
+        "parameters": [
+          {
+            "name": "bug_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "open",
+                      "reopened",
+                      "fixed",
+                      "wontfix",
+                      "invalid",
+                      "judge-rejected"
+                    ],
+                    "description": "New status. Use \"fixed\" once you have fixed the bug, \"wontfix\" to dismiss it, or \"invalid\" if it is not a real bug. Marking a bug resolved automatically retries the affected journey to confirm the fix."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated bug"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/journeys": {
+      "get": {
+        "operationId": "listJourneys",
+        "summary": "List test journeys (user flows) defined for a project",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of journeys"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createJourney",
+        "summary": "Create an unstepped (agent-driven) test journey",
+        "description": "Creates an unstepped journey — one with no scripted steps. An AI agent reads the\njourney name, description, and instructions, then drives the app with Playwright to\ncarry out the flow, recording the session and filing any bugs it finds.\n\nIf the project is active, the journey is scheduled to run immediately. Use `target_url`\nto point this journey at a URL different from the project's base URL (e.g. a deep link\nor a different environment) — that URL is where the recording is created. Set `polish`\nto also run the project's enabled polish passes against the resulting recording.",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Short name for the journey (the flow under test)."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "What the agent should do — the scenario to carry out in the app."
+                  },
+                  "instructions": {
+                    "type": "string",
+                    "description": "Optional extra guidance / post-run checks for the agent."
+                  },
+                  "target_url": {
+                    "type": "string",
+                    "description": "Optional URL to record this journey against, overriding the project's base URL. When omitted, the project's URL is used."
+                  },
+                  "polish": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "When true, the project's enabled polish passes also run against this journey's recording."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created journey"
+          }
+        }
+      }
+    },
+    "/api/v1/journeys/{journey_id}": {
+      "get": {
+        "operationId": "getJourney",
+        "summary": "Get a journey with its versions and the bugs associated with it",
+        "description": "Returns the journey (including its target_url override, if any, and version history) plus `bugs`: every bug filed by this journey's test runs.",
+        "parameters": [
+          {
+            "name": "journey_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Journey detail with associated bugs"
+          }
+        }
+      }
+    },
+    "/api/v1/explorations/{exploration_id}": {
+      "get": {
+        "operationId": "getExploration",
+        "summary": "Get an exploration with the journeys it discovered and the bugs associated with it",
+        "description": "Returns the exploration plus `journeys` (the journeys it created/updated) and `bugs` (polish-pass findings against the exploration's own recording). Each discovered journey's own bugs are available via GET /journeys/{journey_id}.",
+        "parameters": [
+          {
+            "name": "exploration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exploration detail with discovered journeys and associated bugs"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/test-runs": {
+      "get": {
+        "operationId": "listTestRuns",
+        "summary": "List test runs for a project",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "journey_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of test runs"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/explorations": {
+      "get": {
+        "operationId": "listExplorations",
+        "summary": "List AI explorations for a project",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of explorations"
+          }
+        }
+      },
+      "post": {
+        "operationId": "startExploration",
+        "summary": "Start a new AI exploration to discover user journeys",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "description": "What the AI agent should explore",
+                    "default": "Explore the app and test the main features"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created exploration"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project_id}/versions": {
+      "get": {
+        "operationId": "listVersions",
+        "summary": "List app versions for a project",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of versions"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createVersion",
+        "summary": "Record a new app version and trigger a version-added task",
+        "description": "Records a new deployed version of the app (git SHA, branch, timestamp, deployed URL,\noptional change description). Adding a version kicks off a version-added task that reviews\nthe change and keeps the project's journeys in sync — it adds new journeys, and for\nmain-branch versions may update/delete existing ones, then triggers test runs for the\nnew/changed journeys. Requires the project to have a GitHub link and main branch configured\nin its settings.",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "git_sha",
+                  "branch_name"
+                ],
+                "properties": {
+                  "git_sha": {
+                    "type": "string",
+                    "description": "Git commit SHA for this version."
+                  },
+                  "branch_name": {
+                    "type": "string",
+                    "description": "Git branch name the version was deployed from."
+                  },
+                  "deployed_url": {
+                    "type": "string",
+                    "description": "URL where this version is deployed (defaults to the project URL)."
+                  },
+                  "timestamp": {
+                    "type": "string",
+                    "description": "ISO 8601 deployment time (defaults to now)."
+                  },
+                  "change_description": {
+                    "type": "string",
+                    "description": "Human-readable summary of what changed in this version."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created version (its version-added task is queued)."
+          }
+        }
+      }
+    }
+  }
+}

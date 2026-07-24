@@ -71,9 +71,9 @@ The judge submits their own claim; it runs the identical pipeline, zero human to
 - Or hit the endpoint directly (same code path):
 
 ```bash
-curl -sS -X POST http://localhost:8000/api/judge-submit \
+curl -sS -X POST http://localhost:8000/api/claims \
   -H "Content-Type: application/json" \
-  -d '{"task_id":"T5","claim":"done","target_url":"'"$TARGET_APP_URL"'"}'
+  -d '{"agent_id":"judge","task_id":"T5","claim_text":"T5 done — search filter implemented and tested"}'
 ```
 
 Narrate: claim → Replay explores the real app → verdict → Guild tier change, all on live data. Close by quoting the criterion back: *"everything you watched acted on live data with zero human clicks."* The receipts page (Replay report URLs + Guild session JSON + Pioneer job ID, dumped from live state) is on screen the whole time.
