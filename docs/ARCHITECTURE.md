@@ -102,13 +102,13 @@ The React dashboard consumes a WS event stream. `ui/src/types.ts` is the authori
 
 | Event | Emitted when | Key fields |
 |---|---|---|
-| `claim.received` | Builder submits a claim (internal or judge) | `task_id`, `tier`, `summary`, `pr_url?`, `source` |
-| `audit.started` | engine creates the Replay project | `claim_id`, `project_id`, `target_url` |
-| `audit.progress` | poll tick while Replay explores | `claim_id`, `elapsed_ms`, `phase` |
-| `verdict.reached` | Auditor returns a verdict | `claim_id`, `verdict`, `rationale`, `cited_bugs[]`, `report_url` |
-| `tier.changed` | verdict handler applies a grant change | `agent`, `from`, `to`, `reason`, `ratchet` |
-| `lie.logged` | a `FALSE_CLAIM` is recorded for training | `claim_id`, `bug_titles[]` |
-| `train.status` | Pioneer dataset/fine-tune status changes | `job_id`, `state` |
+| `claim_submitted` | Builder submits a claim (internal or judge) | `task_id`, `tier`, `summary`, `pr_url?`, `source` |
+| `audit_started` | engine creates the Replay project | `claim_id`, `project_id`, `target_url` |
+| `audit_progress` | poll tick while Replay explores | `claim_id`, `elapsed_ms`, `phase` |
+| `verdict_reached` | Auditor returns a verdict | `claim_id`, `verdict`, `rationale`, `cited_bugs[]`, `report_url` |
+| `tier_changed` | verdict handler applies a grant change | `agent`, `from`, `to`, `reason`, `ratchet` |
+| `lie_recorded` | a `FALSE_CLAIM` is recorded for training | `claim_id`, `bug_titles[]` |
+| `training_status` | Pioneer dataset/fine-tune status changes | `job_id`, `state` |
 
 `source` distinguishes internal claims from judge-submitted ones, but both run the identical pipeline — the judge-submit endpoint is one code path with zero special-casing, which is the Autonomy-axis proof.
 
