@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
 
 def _engine_dir() -> Path:
@@ -52,6 +53,98 @@ PIONEER_MODEL = os.getenv("PIONEER_MODEL")
 GUILD_WORKSPACE = os.getenv("GUILD_WORKSPACE", "confession/confession")
 # The Guild agent whose write-tool grant is added on promotion and removed on demotion.
 GUILD_L1_AGENT = os.getenv("GUILD_L1_AGENT", "builder-l1")
+
+# --- Builder loop ----------------------------------------------------------
+
+# The Guild agent the Builder loop invokes at tier L0 (read-only grant). The L1 agent
+# (write grant) is either GUILD_BUILDER_L1_AGENT or, if unset, derived by swapping the
+# "l0" marker for "l1" — so a promoted builder literally runs as the write-grant agent.
+GUILD_BUILDER_AGENT = os.getenv("GUILD_BUILDER_AGENT", "confession~confession-builder-l0")
+GUILD_BUILDER_L1_AGENT = os.getenv("GUILD_BUILDER_L1_AGENT")
+
+# The stable logical identity the Builder claims under and whose tier is ratcheted. It is
+# deliberately independent of the tier-specific Guild agent name above (the same logical
+# builder is what gets promoted L0 -> L1).
+BUILDER_AGENT_ID = os.getenv("CONFESSION_BUILDER_AGENT_ID", "builder")
+
+
+def tasks_file() -> Path:
+    """Path to the real target-app task list the Builder picks work from.
+
+    Defaults to `../target-app/TASKS.md` relative to `engine/`. Override with TASKS_FILE.
+    """
+    override = os.getenv("TASKS_FILE")
+    return Path(override).resolve() if override else (_engine_dir().parent / "target-app" / "TASKS.md")
+
+
+def guild_builder_agent(tier: int) -> str:
+    """The Guild agent to invoke for a given builder tier: L0 uses GUILD_BUILDER_AGENT;
+    L1 uses GUILD_BUILDER_L1_AGENT, or the L0 name with its "l0" marker swapped to "l1"."""
+    if tier >= 1:
+        if GUILD_BUILDER_L1_AGENT:
+            return GUILD_BUILDER_L1_AGENT
+        return _swap_tier_marker(GUILD_BUILDER_AGENT)
+    return GUILD_BUILDER_AGENT
+
+
+def _swap_tier_marker(agent: str) -> str:
+    for lo, hi in (("l0", "l1"), ("L0", "L1")):
+        if lo in agent:
+            return agent.replace(lo, hi)
+    return agent
+
+
+# --- Agent identity policy -------------------------------------------------
+
+
+def allowed_agents() -> Optional[set[str]]:
+    """The set of agent_ids permitted to submit claims over HTTP, or None when no
+    allowlist is configured (any agent_id accepted). Set CONFESSION_ALLOWED_AGENTS to a
+    comma-separated list to enable it; judge identities are always allowed regardless."""
+    raw = os.getenv("CONFESSION_ALLOWED_AGENTS")
+    if not raw:
+        return None
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def judge_agents() -> set[str]:
+    """Identities whose claims run the full audit but never move any tier and never feed
+    the fine-tune ledger — a judge's test claim is not genuine builder behavior. Defaults
+    to {"judge"}; override with CONFESSION_JUDGE_AGENTS (comma-separated)."""
+    raw = os.getenv("CONFESSION_JUDGE_AGENTS", "judge")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+def is_judge_agent(agent_id: str) -> bool:
+    return agent_id in judge_agents()
+
+
+# --- Re-audit loop ---------------------------------------------------------
+
+
+def reaudit_interval_s() -> float:
+    try:
+        return max(1.0, float(os.getenv("REAUDIT_INTERVAL_S", "120")))
+    except ValueError:
+        return 120.0
+
+
+def reaudit_max_attempts() -> int:
+    try:
+        return max(0, int(os.getenv("REAUDIT_MAX_ATTEMPTS", "3")))
+    except ValueError:
+        return 3
+
+
+# --- CORS ------------------------------------------------------------------
+
+
+def cors_origins() -> list[str]:
+    """Allowed browser origins for the dashboard. Defaults to the local Vite dev pair;
+    override with CORS_ORIGINS (comma-separated) for a deployed dashboard."""
+    raw = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
 
 # --- Tier ratchet ----------------------------------------------------------
 

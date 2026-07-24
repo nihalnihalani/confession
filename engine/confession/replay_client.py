@@ -1,8 +1,8 @@
 """Replay QA REST client — the verdict oracle.
 
-Implemented against the sponsor OpenAPI spec at
-`sponsor-docs/replay/loop-qa-openapi.json`. Endpoint paths and request/response fields
-below are cited from that spec by operationId.
+Implemented against the Replay QA OpenAPI spec committed at `docs/replay-openapi.json`
+(the live copy is served from the API host under `/api/v1/openapi.json`). Endpoint paths
+and request/response fields below are cited from that spec by operationId.
 
 The spec's "Continuous QA workflow" is explicit that Replay drives exploration and
 testing itself: after `POST /api/v1/projects` you poll status and read bugs — you do NOT

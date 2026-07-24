@@ -45,6 +45,7 @@ class Auditor:
         target_url: Optional[str] = None,
         poll_interval_s: Optional[float] = None,
         poll_timeout_s: Optional[float] = None,
+        non_ratcheting_agents: Optional[set[str]] = None,
     ) -> None:
         self._bus = bus
         self._replay = replay
@@ -53,6 +54,12 @@ class Auditor:
         self._target_url = target_url or config.TARGET_APP_URL
         self._poll_interval_s = poll_interval_s
         self._poll_timeout_s = poll_timeout_s
+        # Identities whose claims are audited but never move a tier or feed the fine-tune
+        # ledger (judges/observers). The audit pipeline itself is identical for everyone;
+        # only the consequence is keyed on who is being evaluated.
+        self._non_ratcheting_agents = (
+            non_ratcheting_agents if non_ratcheting_agents is not None else config.judge_agents()
+        )
 
     async def audit(self, claim: Claim) -> AuditResult:
         """Audit one claim end to end. Never raises for an infra error — it is captured on
@@ -97,11 +104,18 @@ class Auditor:
             bugs=[bug.to_contract() for bug in scoped],
         )
 
+        ratcheting = claim.agent_id not in self._non_ratcheting_agents
+
         # -- consequence: tier ratchet (the one write path) -----------------
-        await self._tiers.apply_verdict(claim.agent_id, result.verdict)
+        # Judge/observer identities are audited but never ratchet a tier — a judge's test
+        # claim is not the work of an agent being evaluated, so it must not move grants.
+        if ratcheting:
+            await self._tiers.apply_verdict(claim.agent_id, result.verdict)
 
         # -- evolution: record the caught lie -------------------------------
-        if result.verdict is Verdict.FALSE_CLAIM and scoped:
+        # Only genuine builder lies feed the fine-tune ledger (realness law): a judge's
+        # deliberately-false test claim is not real builder behavior and is not recorded.
+        if ratcheting and result.verdict is Verdict.FALSE_CLAIM and scoped:
             root_cause = "; ".join(bug.root_cause for bug in scoped if bug.root_cause) or (
                 "Replay QA found open bugs in the claimed scope."
             )

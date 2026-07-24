@@ -16,10 +16,11 @@ import asyncio
 import json
 import sys
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 from . import config
 from .auditor import Auditor
+from .builder import BuilderNotConfigured, BuilderRunner
 from .events import Event, EventBus
 from .models import Claim, Verdict
 from .replay_client import ReplayClient, ReplayConfigError
@@ -98,6 +99,59 @@ def _cmd_audit(args: argparse.Namespace) -> int:
     return 0 if outcome["verdict"] in {v.value for v in Verdict} else 1
 
 
+async def _run_builder(task_id: Optional[str], target_url: str) -> dict[str, Any]:
+    bus = EventBus()
+
+    async def _drain() -> None:
+        async with bus.subscribe(replay_history=False) as stream:
+            async for event in stream:
+                print(f"  · {event.type.value}", file=sys.stderr)
+
+    drain_task = asyncio.create_task(_drain())
+    replay = ReplayClient()
+    tiers = TierManager(bus=bus)
+    trainer = Trainer(bus=bus)
+    auditor = Auditor(bus=bus, replay=replay, tiers=tiers, trainer=trainer, target_url=target_url)
+    runner = BuilderRunner(auditor=auditor, tiers=tiers, bus=bus)
+    outcome = await runner.run(task_id)
+    await asyncio.sleep(0)
+    drain_task.cancel()
+    return outcome
+
+
+def _cmd_builder(args: argparse.Namespace) -> int:
+    target_url = args.target_url or config.TARGET_APP_URL
+    if not target_url:
+        print("error: --target-url or TARGET_APP_URL is required", file=sys.stderr)
+        return 2
+    try:
+        outcome = asyncio.run(_run_builder(args.task, target_url))
+    except ReplayConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except BuilderNotConfigured as exc:
+        print(f"error: builder not configured — {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(outcome, indent=2))
+    else:
+        status = outcome.get("status")
+        print(f"BUILDER: {status}  (task {outcome.get('task_id')}, agent {outcome.get('guild_agent')})")
+        if status == "audited":
+            print(f"  claim: {outcome.get('claim_id')}")
+            print(f"  VERDICT: {outcome.get('verdict')}")
+            if outcome.get("report_url"):
+                print(f"  Replay report: {outcome['report_url']}")
+            if outcome.get("error"):
+                print(f"  Infra error (PENDING, re-audit): {outcome['error']}")
+        elif status == "blocked":
+            print(f"  agent reported blocked: {outcome.get('summary')}")
+        elif status == "no_claim":
+            print("  agent produced no valid [CLAIM ...] block; nothing audited")
+    return 0
+
+
 def _cmd_receipts(args: argparse.Namespace) -> int:
     tiers = TierManager()
     trainer = Trainer()
@@ -124,6 +178,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--task-id", default="task", help="task id the claim refers to")
     audit.add_argument("--json", action="store_true", help="emit the outcome as JSON")
     audit.set_defaults(func=_cmd_audit)
+
+    builder = sub.add_parser("builder", help="run one autonomous Builder attempt end to end")
+    builder.add_argument("--task", default=None, help="task id to attempt (default: first not-done)")
+    builder.add_argument("--target-url", default=None, help="deployed app URL (or TARGET_APP_URL)")
+    builder.add_argument("--json", action="store_true", help="emit the outcome as JSON")
+    builder.set_defaults(func=_cmd_builder)
 
     receipts = sub.add_parser("receipts", help="print current receipts state as JSON")
     receipts.add_argument("--json", action="store_true", help="(default) JSON output")

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,8 +34,9 @@ from pydantic import BaseModel, model_validator
 
 from . import config
 from .auditor import Auditor
+from .builder import BuilderNotConfigured, BuilderRunner
 from .events import EventBus
-from .models import AuditResult, Claim, EventType, tier_label, utcnow
+from .models import AuditResult, Claim, EventType, Verdict, tier_label, utcnow
 from .pioneer_client import (
     PioneerClient,
     PioneerNotConfigured,
@@ -42,6 +44,7 @@ from .pioneer_client import (
     job_id_of,
     job_state_of,
 )
+from .reaudit import ReauditScheduler
 from .replay_client import ReplayClient, ReplayConfigError
 from .tiers import TierManager
 from .trainer import Trainer
@@ -61,6 +64,13 @@ class ClaimRequest(BaseModel):
         if isinstance(data, dict) and "claim_text" not in data and "text" in data:
             data = {**data, "claim_text": data["text"]}
         return data
+
+
+class BuilderRunRequest(BaseModel):
+    """POST /api/builder/run body. `task_id` is optional; when omitted the Builder picks
+    the first not-yet-done task from the task list."""
+
+    task_id: Optional[str] = None
 
 
 class AppState:
@@ -91,24 +101,72 @@ class AppState:
     def auditor(self) -> Auditor:
         return Auditor(bus=self.bus, replay=self.replay, tiers=self.tiers, trainer=self.trainer)
 
+    async def store_result(self, claim: Claim, result: AuditResult) -> None:
+        """Capture a claim + its (possibly re-audited) result into server state and signal
+        the receipts panel to refresh."""
+        self.claims[claim.id] = claim
+        self.results[claim.id] = result
+        await self.bus.emit(EventType.RECEIPTS_UPDATED)
+
+    def pending_claims(self) -> list[tuple[Claim, AuditResult]]:
+        """Claims whose latest audit ended PENDING (candidates for re-audit)."""
+        pending: list[tuple[Claim, AuditResult]] = []
+        for claim_id, result in self.results.items():
+            if result.verdict is Verdict.PENDING:
+                claim = self.claims.get(claim_id)
+                if claim is not None:
+                    pending.append((claim, result))
+        return pending
+
+    def builder_runner(self) -> BuilderRunner:
+        return BuilderRunner(
+            auditor=self.auditor(),
+            tiers=self.tiers,
+            bus=self.bus,
+            result_sink=self.store_result,
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Validate the Pioneer model at startup when a key is configured (hard-fail if the
-    configured model is not listed) — but never require Pioneer to boot the server."""
+    """Startup/shutdown. Validates the Pioneer model when a key is configured (hard-fail
+    if the configured model is not listed, but never require Pioneer to boot), and runs
+    the autonomous PENDING re-audit loop for the life of the process."""
     if config.pioneer_configured() and config.PIONEER_MODEL:
         try:
             await PioneerClient().validate_model(config.PIONEER_MODEL)
         except PioneerNotConfigured:
             pass
-    yield
+
+    state: AppState = app.state.engine
+    reaudit_task: Optional[asyncio.Task] = None
+    max_attempts = config.reaudit_max_attempts()
+    if max_attempts > 0:
+        scheduler = ReauditScheduler(
+            pending=state.pending_claims,
+            audit=lambda claim: state.auditor().audit(claim),
+            store=state.store_result,
+            max_attempts=max_attempts,
+            interval_s=config.reaudit_interval_s(),
+        )
+        app.state.reaudit = scheduler
+        reaudit_task = asyncio.create_task(scheduler.run_forever())
+    try:
+        yield
+    finally:
+        if reaudit_task is not None:
+            reaudit_task.cancel()
+            try:
+                await reaudit_task
+            except asyncio.CancelledError:
+                pass
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="CONFESSION engine", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=config.cors_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -139,6 +197,21 @@ def create_app() -> FastAPI:
     async def _submit_claim(request: ClaimRequest) -> dict[str, str]:
         if not config.TARGET_APP_URL:
             raise HTTPException(status_code=503, detail="TARGET_APP_URL is not configured.")
+        # Agent-identity gate: when an allowlist is configured, only listed agent_ids may
+        # submit (judge identities are always allowed). This stops an anonymous caller
+        # from spoofing a builder identity to farm promotions. Judge claims are audited
+        # but never move a tier (enforced in the auditor).
+        allowed = config.allowed_agents()
+        if allowed is not None and request.agent_id not in allowed and not config.is_judge_agent(
+            request.agent_id
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"agent_id {request.agent_id!r} is not permitted to submit claims. "
+                    f"Allowed: {sorted(allowed)} (plus judge identities)."
+                ),
+            )
         _ = state.replay  # a missing Replay token fails fast with 503
         claim = Claim(
             id=uuid.uuid4().hex,
@@ -174,14 +247,38 @@ def create_app() -> FastAPI:
     async def _tasks() -> list[dict[str, str]]:
         return _load_tasks()
 
-    # Register claim/receipts/tasks under both /api/* (what the UI calls through its dev
-    # proxy) and the bare paths (convenient for curl and the original brief). Same
+    async def _run_builder(task_id: Optional[str]) -> None:
+        try:
+            await state.builder_runner().run(task_id)
+        except BuilderNotConfigured:
+            # The Guild CLI could not run; nothing is fabricated. The condition is already
+            # recorded to the builder log — surfaced via the CLI path, not this endpoint.
+            return
+
+    async def _builder_run(request: BuilderRunRequest) -> dict[str, Any]:
+        if not config.TARGET_APP_URL:
+            raise HTTPException(status_code=503, detail="TARGET_APP_URL is not configured.")
+        _ = state.replay  # a missing Replay token fails fast with 503
+        if shutil.which("npx") is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "npx is not on PATH — the Guild CLI cannot run, so the Builder agent "
+                    "cannot be invoked. Install Node.js and authenticate the Guild CLI."
+                ),
+            )
+        asyncio.create_task(_run_builder(request.task_id))
+        return {"status": "started", "task_id": request.task_id}
+
+    # Register claim/receipts/tasks/builder under both /api/* (what the UI calls through
+    # its dev proxy) and the bare paths (convenient for curl and the original brief). Same
     # handlers, one behavior — no special-casing.
     for prefix in ("/api", ""):
         app.post(f"{prefix}/claims")(_submit_claim)
         app.get(f"{prefix}/claims/{{claim_id}}")(_get_claim)
         app.get(f"{prefix}/receipts")(_receipts)
         app.get(f"{prefix}/tasks")(_tasks)
+        app.post(f"{prefix}/builder/run")(_builder_run)
 
     @app.get("/events")
     async def events() -> dict[str, Any]:
