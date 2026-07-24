@@ -1,0 +1,17 @@
+{
+  "name": "tasklight",
+  "version": "1.0.0",
+  "description": "Tasklight — a small team task tracker (the real CRUD app CONFESSION's Builder agent works on).",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
