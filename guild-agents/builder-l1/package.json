@@ -1,0 +1,11 @@
+{
+  "name": "@guildai/confession~confession-builder-l1",
+  "version": "1.0.0",
+  "description": "CONFESSION Builder (L1 — write tier): read + write grant (commit files, open PRs, comment, label).",
+  "private": true,
+  "main": "agent.ts",
+  "dependencies": {
+    "@guildai/agents-sdk": "*",
+    "zod": "*"
+  }
+}

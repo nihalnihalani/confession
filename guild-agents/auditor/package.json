@@ -1,0 +1,11 @@
+{
+  "name": "@guildai/confession~confession-auditor",
+  "version": "1.0.0",
+  "description": "CONFESSION Auditor: read-only, turns a claim + Replay bug report into a structured verdict rationale.",
+  "private": true,
+  "main": "agent.ts",
+  "dependencies": {
+    "@guildai/agents-sdk": "*",
+    "zod": "*"
+  }
+}
