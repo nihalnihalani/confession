@@ -59,6 +59,7 @@ npx --yes @guildai/cli@latest session list --workspace confession/confession --j
 - Commit style: imperative summary + `Co-Authored-By: Claude <model> <noreply@anthropic.com>`. Push to `origin main` (public repo — it's a submission requirement; never commit `.env`).
 - Multi-agent work: lanes are law — `engine/` vs `ui/` vs `guild-agents/` vs `target-app/`. Contract changes (types.ts + emitter) land in one commit or not at all.
 - Every code path that creates Replay projects or Guild sessions must be idempotent or cleaned up; check for orphans before judging.
+- Any parser claimed to consume a checked-in artifact must have a regression test against that exact file and format, not only inline examples.
 
 ## Don'ts
 - DON'T write a mock/fallback/synthetic anything (see THE REALNESS LAW). A broken live demo scoped down honestly beats a smooth fake one — and the judges built these tools.

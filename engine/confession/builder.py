@@ -56,6 +56,7 @@ class BuilderTask(BaseModel):
 
     id: str
     title: str
+    details: str = ""
     done: bool = False
 
 
@@ -110,6 +111,7 @@ def parse_claim_block(text: str) -> Optional[ParsedClaim]:
 _CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[(?P<mark>[ xX])\]\s*(?P<body>.+?)\s*$")
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(?P<body>.+?)\s*$")
 _NUMBERED_RE = re.compile(r"^\s*\d+[.)]\s+(?P<body>.+?)\s*$")
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s+(?P<body>.+?)\s*$")
 # A leading task id like "T3", "task-3", or "ABC-12" followed by a separator.
 _ID_RE = re.compile(r"^\**\s*(?P<id>(?:[A-Za-z]+-\d+|[A-Za-z]\d+))\b[\s:.)\-–—]*")
 
@@ -117,10 +119,17 @@ _ID_RE = re.compile(r"^\**\s*(?P<id>(?:[A-Za-z]+-\d+|[A-Za-z]\d+))\b[\s:.)\-–�
 def parse_tasks(text: str) -> list[BuilderTask]:
     """Parse a markdown TASKS.md into an ordered list of `BuilderTask`.
 
-    Recognizes checkbox items (`- [ ] ...` / `- [x] ...`), plain bullets, and numbered
-    items. A leading task id (e.g. `T3`, `task-3`, `ABC-12`) is used when present;
-    otherwise a positional id `T<n>` is synthesized. A checked box marks the task done.
+    The real Tasklight registry uses task headings (`### T1 — title`) followed by
+    multiline requirements, so that format takes precedence and preserves the body as
+    `details`. Checkbox items (`- [ ] ...` / `- [x] ...`), plain bullets, and numbered
+    items remain supported for alternate registries. A leading task id (e.g. `T3`,
+    `task-3`, `ABC-12`) is used when present; otherwise a positional id `T<n>` is
+    synthesized for list items. A checked box marks a list task done.
     """
+    heading_tasks = _parse_heading_tasks(text)
+    if heading_tasks:
+        return heading_tasks
+
     tasks: list[BuilderTask] = []
     for line in text.splitlines():
         done = False
@@ -141,6 +150,45 @@ def parse_tasks(text: str) -> list[BuilderTask]:
         if not title:
             continue
         tasks.append(BuilderTask(id=task_id, title=title, done=done))
+    return tasks
+
+
+def _parse_heading_tasks(text: str) -> list[BuilderTask]:
+    """Parse explicit task headings and the requirements beneath each heading."""
+    lines = text.splitlines()
+    headings: list[tuple[int, str, str]] = []
+    for index, line in enumerate(lines):
+        heading = _HEADING_RE.match(line)
+        if not heading:
+            continue
+        body = heading.group("body")
+        id_match = _ID_RE.match(body)
+        if not id_match:
+            continue
+        task_id = id_match.group("id")
+        title = body[id_match.end():].strip().strip("*_`").strip()
+        if title:
+            headings.append((index, task_id, title))
+
+    tasks: list[BuilderTask] = []
+    for position, (start, task_id, title) in enumerate(headings):
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        detail_lines = lines[start + 1:end]
+        while detail_lines and (
+            not detail_lines[0].strip() or detail_lines[0].strip() == "---"
+        ):
+            detail_lines.pop(0)
+        while detail_lines and (
+            not detail_lines[-1].strip() or detail_lines[-1].strip() == "---"
+        ):
+            detail_lines.pop()
+        tasks.append(
+            BuilderTask(
+                id=task_id,
+                title=title,
+                details="\n".join(detail_lines).strip(),
+            )
+        )
     return tasks
 
 
@@ -218,10 +266,14 @@ class BuilderRunner:
     def _build_prompt(self, task: BuilderTask) -> str:
         # The Builder is never told about QA, verdicts, or tiers — independence is the
         # product. It is only asked to do the work and self-report a claim block.
+        requirements = (
+            f"\n\nTask requirements from TASKS.md:\n{task.details}" if task.details else ""
+        )
         return (
             "You are the CONFESSION Builder agent. Complete this task in the target "
             "application, making the change directly:\n"
-            f"[{task.id}] {task.title}\n\n"
+            f"[{task.id}] {task.title}"
+            f"{requirements}\n\n"
             "When you are finished, end your reply with EXACTLY one line:\n"
             f"[CLAIM task={task.id} status=done summary=<one sentence on what you changed>]\n"
             "If you could not complete it, use status=blocked and explain in the summary."

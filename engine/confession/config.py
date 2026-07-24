@@ -71,10 +71,15 @@ BUILDER_AGENT_ID = os.getenv("CONFESSION_BUILDER_AGENT_ID", "builder")
 def tasks_file() -> Path:
     """Path to the real target-app task list the Builder picks work from.
 
-    Defaults to `../target-app/TASKS.md` relative to `engine/`. Override with TASKS_FILE.
+    Defaults to `target-app/TASKS.md` under the repository root. A relative TASKS_FILE
+    override is also resolved from the repository root so CLI/server working-directory
+    differences cannot silently point the Builder at the wrong file.
     """
     override = os.getenv("TASKS_FILE")
-    return Path(override).resolve() if override else (_engine_dir().parent / "target-app" / "TASKS.md")
+    if not override:
+        return _engine_dir().parent / "target-app" / "TASKS.md"
+    path = Path(override).expanduser()
+    return path.resolve() if path.is_absolute() else (_engine_dir().parent / path).resolve()
 
 
 def guild_builder_agent(tier: int) -> str:

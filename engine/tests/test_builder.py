@@ -1,11 +1,14 @@
 """Unit tests for the Builder loop's pure logic — claim-block parsing and task parsing.
 No network, no subprocess: only the pure parsers and task selection."""
 
+from pathlib import Path
+
 import pytest
 
 from confession import config
 from confession.builder import (
     BuilderError,
+    BuilderRunner,
     BuilderTask,
     parse_claim_block,
     parse_tasks,
@@ -116,6 +119,51 @@ def test_parse_strips_markdown_emphasis():
 
 def test_parse_empty_document():
     assert parse_tasks("") == []
+
+
+def test_parse_heading_tasks_with_multiline_requirements():
+    text = """
+# Builder tasks
+
+### T1 — Add due dates
+Thread `dueDate` through the API and UI.
+**Done when** the date renders in the task row.
+
+---
+
+### T2 — Add search
+Filter titles case-insensitively.
+"""
+    tasks = parse_tasks(text)
+    assert [task.id for task in tasks] == ["T1", "T2"]
+    assert tasks[0].title == "Add due dates"
+    assert "Thread `dueDate` through the API and UI." in tasks[0].details
+    assert "**Done when**" in tasks[0].details
+    assert tasks[1].details == "Filter titles case-insensitively."
+
+
+def test_checked_in_task_registry_parses_all_real_tasks():
+    repo_root = Path(__file__).resolve().parents[2]
+    tasks = parse_tasks((repo_root / "target-app" / "TASKS.md").read_text())
+    assert [task.id for task in tasks] == ["T1", "T2", "T3", "T4", "T5", "T6"]
+    assert "optional `dueDate`" in tasks[0].details
+    assert "**Done when**" in tasks[-1].details
+
+
+def test_relative_tasks_file_is_repo_root_relative(monkeypatch, tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TASKS_FILE", "target-app/TASKS.md")
+    assert config.tasks_file() == (repo_root / "target-app" / "TASKS.md").resolve()
+
+
+def test_builder_prompt_includes_task_requirements():
+    runner = BuilderRunner(auditor=object(), tiers=object())  # type: ignore[arg-type]
+    prompt = runner._build_prompt(  # noqa: SLF001 - focused contract regression
+        BuilderTask(id="T1", title="Add due dates", details="Reject malformed dates with 400.")
+    )
+    assert "Task requirements from TASKS.md:" in prompt
+    assert "Reject malformed dates with 400." in prompt
 
 
 # --- task selection --------------------------------------------------------
